@@ -1,0 +1,33 @@
+
+[package]
+name = "pitch-analyzer-tauri"
+version = "0.1.0"
+description = "人声音高测量工具 - Vocal pitch analyzer using FCPE deep learning model"
+authors = ["Pitch Analyzer Contributors"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/your-username/pitch-analyzer-tauri"
+homepage = "https://github.com/your-username/pitch-analyzer-tauri"
+keywords = ["audio", "pitch", "music", "fcpe", "tauri"]
+categories = ["multimedia::audio"]
+
+[lib]
+name = "pitch_analyzer_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ndarray = "0.16"
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic", "ndarray"] }
+symphonia = { version = "0.5", features = ["mp3", "wav", "flac", "aac"] }
+rubato = "0.16"
+rustfft = "6.2"
+regex = "1"
+rodio = { version = "0.20", default-features = false, features = ["symphonia-all"] }

@@ -1,0 +1,120 @@
+
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>人声音高测量工具</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div id="app">
+      <div class="sidebar">
+        <div class="sidebar-title">人声音高测量</div>
+        <div class="sidebar-subtitle">基于 FCPE 深度学习模型</div>
+
+        <div class="panel">
+          <div class="panel-title">快速预设</div>
+          <div class="panel-desc">选择适合的场景，自动配置最佳参数</div>
+          <div class="preset-buttons">
+            <button class="preset-btn" data-preset="pop">流行</button>
+            <button class="preset-btn" data-preset="folk">民谣</button>
+            <button class="preset-btn" data-preset="classical">古典</button>
+          </div>
+          <div class="preset-desc" id="preset-desc"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">基础设置</div>
+          <div class="field">
+            <label for="confidence">置信阈值</label>
+            <input type="number" id="confidence" step="0.05" min="0.05" max="0.95" value="0.3">
+          </div>
+          <div class="field">
+            <label for="fmin">最低频率 (Hz)</label>
+            <input type="number" id="fmin" step="1" min="20" max="200" value="65">
+          </div>
+          <div class="field">
+            <label for="fmax">最高频率 (Hz)</label>
+            <input type="number" id="fmax" step="1" min="500" max="5000" value="1300">
+          </div>
+          <div class="field">
+            <label for="quantize">对齐到半音</label>
+            <input type="checkbox" id="quantize">
+          </div>
+        </div>
+
+        <div class="panel">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <div class="panel-title" style="margin-bottom: 0;">平滑与降噪</div>
+            <button class="advanced-toggle" id="advanced-toggle">展开</button>
+          </div>
+          <div class="advanced-content" id="advanced-content" style="display: none;">
+            <div class="field">
+              <label for="median">峰值过滤</label>
+              <input type="number" id="median" step="2" min="0" max="31" value="11">
+            </div>
+            <div class="field">
+              <label for="smoothing">曲线平滑</label>
+              <input type="number" id="smoothing" step="2" min="0" max="31" value="15">
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">文件操作</div>
+          <button class="btn btn-primary" id="import-audio" style="width: 100%; margin-bottom: 8px;">
+            📂 导入音频并分析
+          </button>
+          <div class="button-row" style="margin-bottom: 8px;">
+            <button class="btn btn-secondary" id="import-lrc">🎵 导入 LRC</button>
+            <button class="btn btn-secondary" id="import-txt">📝 导入 TXT</button>
+          </div>
+          <button class="btn" id="clear-lyrics" style="width: 100%; margin-bottom: 8px;" disabled>
+            🗑 清除歌词
+          </button>
+          <div class="button-row" style="margin-bottom: 8px;">
+            <button class="btn btn-secondary" id="save-proj" disabled>💾 保存</button>
+            <button class="btn btn-secondary" id="load-proj">📂 加载</button>
+          </div>
+          <div class="button-row">
+            <button class="btn btn-secondary" id="export-srt" disabled>📋 导出 SRT</button>
+          </div>
+        </div>
+
+        <div class="sidebar-footer">
+          <div class="status" id="status">等待导入音频...</div>
+        </div>
+      </div>
+
+      <div class="main-area">
+        <div class="karaoke-panel">
+          <div class="karaoke-header" id="karaoke-header">当前音高</div>
+          <div class="karaoke-display" id="karaoke-display">
+            <div id="karaoke-pitch">---</div>
+          </div>
+        </div>
+        <div class="pitch-panel">
+          <canvas id="pitch-canvas" class="pitch-canvas"></canvas>
+        </div>
+        <div class="bottom-controls">
+          <button class="play-btn" id="play-btn" disabled>▶</button>
+          <div class="time-display" id="time-display">0:00 / 0:00</div>
+          <input type="range" class="progress-slider" id="progress-slider" min="0" max="1000" value="0" disabled>
+          <div class="volume-group">
+            <span class="volume-label">🔊</span>
+            <input type="range" class="volume-slider" id="volume-slider" min="0" max="100" value="100">
+          </div>
+          <div class="font-group">
+            <label for="font-pitch">音高大小</label>
+            <input type="number" id="font-pitch" min="20" max="100" value="48">
+            <label for="font-lyric" style="margin-left: 8px;">歌词大小</label>
+            <input type="number" id="font-lyric" min="10" max="32" value="18">
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
