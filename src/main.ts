@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open, save, message } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import { PitchCanvas } from "./pitch_canvas";
 import { KaraokeDisplay } from "./karaoke_display";
 import { PRESETS, type PitchTrack, type AnalysisParams } from "./types";
@@ -43,6 +44,9 @@ let loadProjBtn: HTMLButtonElement | null;
 let exportSrtBtn: HTMLButtonElement | null;
 let pitchFontInput: HTMLInputElement | null;
 let lyricFontInput: HTMLInputElement | null;
+
+let progressContainerEl: HTMLElement | null = null;
+let progressFillEl: HTMLElement | null = null;
 
 let pitchCanvas: PitchCanvas | null;
 let karaokeDisplay: KaraokeDisplay | null;
@@ -120,7 +124,12 @@ async function doImportAudio() {
     });
     if (!selected) return;
 
+    if (progressContainerEl && progressFillEl) {
+      progressContainerEl.style.display = "block";
+      progressFillEl.style.width = "0%";
+    }
     setStatus("正在分析...");
+
     const params = getCurrentParams();
     const track = (await invoke("analyze_audio", { audioPath: selected, params })) as PitchTrack;
     state.track = track;
@@ -133,6 +142,10 @@ async function doImportAudio() {
     console.error("Import audio failed:", e);
     setStatus("分析失败");
     await message("分析失败: " + e, { title: "错误", kind: "error" });
+  } finally {
+    setTimeout(() => {
+      if (progressContainerEl) progressContainerEl.style.display = "none";
+    }, 1500);
   }
 }
 
@@ -267,6 +280,19 @@ async function initApp() {
     setStatus("初始化失败");
   }
 
+  try {
+    await listen("analysis-progress", (event: any) => {
+      const payload = event.payload as { progress: number; stage: string };
+      if (progressContainerEl && progressFillEl) {
+        progressContainerEl.style.display = "block";
+        progressFillEl.style.width = `${payload.progress * 100}%`;
+      }
+      setStatus(`${payload.stage} (${Math.round(payload.progress * 100)}%)`);
+    });
+  } catch (e) {
+    console.error("Listen to progress event failed:", e);
+  }
+
   pitchCanvasEl = document.querySelector("#pitch-canvas");
   karaokeDisplayEl = document.querySelector("#karaoke-display");
   karaokeHeaderEl = document.querySelector("#karaoke-header");
@@ -294,6 +320,9 @@ async function initApp() {
   exportSrtBtn = document.querySelector("#export-srt");
   pitchFontInput = document.querySelector("#font-pitch");
   lyricFontInput = document.querySelector("#font-lyric");
+
+  progressContainerEl = document.querySelector("#progress-container");
+  progressFillEl = document.querySelector("#progress-fill");
 
   if (pitchCanvasEl) { pitchCanvas = new PitchCanvas(pitchCanvasEl); pitchCanvas.resize(); }
   if (karaokeDisplayEl && karaokeHeaderEl) {

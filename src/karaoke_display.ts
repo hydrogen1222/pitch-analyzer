@@ -1,5 +1,5 @@
 
-import { LyricLine, LyricToken, PitchNote } from "./models_lyrics";
+import { LyricLine } from "./models_lyrics";
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
@@ -114,6 +114,7 @@ export class KaraokeDisplay {
     line.tokens.forEach((token, i) => {
       const text = token.text.split("|")[0];
       const w = tokenWidths[i];
+      const isActive = i === currentTokenIdx;
 
       const noteBox = document.createElement("div");
       noteBox.style.width = `${w}px`;
@@ -125,8 +126,15 @@ export class KaraokeDisplay {
         const noteEl = document.createElement("span");
         noteEl.style.padding = "4px 10px";
         noteEl.style.borderRadius = "6px";
-        noteEl.style.backgroundColor = "rgba(0, 212, 170, 0.2)";
-        noteEl.style.color = "#e6fff9";
+        if (isActive) {
+          noteEl.style.backgroundColor = "rgba(0, 212, 170, 0.55)";
+          noteEl.style.color = "#ffffff";
+          noteEl.style.transform = "scale(1.05)";
+          noteEl.style.transition = "all 0.1s ease";
+        } else {
+          noteEl.style.backgroundColor = "rgba(0, 212, 170, 0.2)";
+          noteEl.style.color = "#e6fff9";
+        }
         noteEl.style.fontWeight = "700";
         noteEl.style.fontSize = `${Math.max(10, Math.floor(this.lyricFontSize * 0.55))}px`;
         const midiRounded = Math.round(token.pitch_notes[0].median_midi);
@@ -143,7 +151,13 @@ export class KaraokeDisplay {
       tokenEl.style.textAlign = "center";
       tokenEl.style.fontSize = `${this.lyricFontSize}px`;
       tokenEl.style.fontWeight = "700";
-      tokenEl.style.color = "#e6e6e6";
+      if (isActive) {
+        tokenEl.style.color = "#00d4aa";
+        tokenEl.style.transform = "scale(1.05)";
+        tokenEl.style.transition = "all 0.1s ease";
+      } else {
+        tokenEl.style.color = "#e6e6e6";
+      }
       tokenEl.textContent = text;
       lyricsRow.appendChild(tokenEl);
     });

@@ -83,7 +83,7 @@ export class PitchCanvas {
     this.drawAudioWaveform(audioRect);
     this.drawPianoRollBackground(mainRect);
     this.drawPitchTrack(mainRect);
-    this.drawPlayCursor(rect, this.currentTime);
+    this.drawPlayCursor({ x: 0, y: 0, w, h }, this.currentTime);
   }
 
   private drawAudioWaveform(rect: { x: number; y: number; w: number; h: number }) {
@@ -95,7 +95,6 @@ export class PitchCanvas {
 
     if (!this.track || !this.audioData) return;
 
-    const duration = this.track.times[this.track.times.length - 1];
     const samplesPerPixel = this.audioData.length / w;
     const mid = y + h / 2;
 

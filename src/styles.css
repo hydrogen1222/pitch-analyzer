@@ -299,6 +299,7 @@ body {
   width: 52px;
   height: 52px;
   border-radius: 50%;
+  flex-shrink: 0;
   border: none;
   background-color: var(--accent);
   color: #000;

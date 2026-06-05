@@ -56,45 +56,83 @@ fn find_model_files(app_handle: &tauri::AppHandle) -> Option<(PathBuf, PathBuf)>
     None
 }
 
-fn try_init_ort_dylib() {
+pub fn try_init_ort_dylib() {
     if std::env::var("ORT_DYLIB_PATH").is_ok() {
         return;
     }
-    let candidates = [
-        "/usr/lib/libonnxruntime.so",
-        "/usr/local/lib/libonnxruntime.so",
-        "/usr/lib/libonnxruntime.so.1",
-        "/usr/local/lib/libonnxruntime.so.1",
-        "/usr/lib64/libonnxruntime.so",
-        "/opt/libonnxruntime.so",
+
+    let find_in_dir = |dir_path: &str| -> Option<PathBuf> {
+        let path = Path::new(dir_path);
+        if !path.is_dir() {
+            return None;
+        }
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if let Some(file_name) = p.file_name().and_then(|n| n.to_str()) {
+                    if file_name.starts_with("libonnxruntime.so") {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+        None
+    };
+
+    // 1. Check direct system library candidates
+    let direct_candidates = [
+        "/usr/lib",
+        "/usr/local/lib",
+        "/usr/lib64",
+        "/opt",
     ];
-    for path in candidates {
-        if Path::new(path).exists() {
-            std::env::set_var("ORT_DYLIB_PATH", path);
-            eprintln!("ORT_DYLIB_PATH = {}", path);
+    for dir in direct_candidates {
+        if let Some(p) = find_in_dir(dir) {
+            std::env::set_var("ORT_DYLIB_PATH", &p);
+            eprintln!("ORT_DYLIB_PATH = {}", p.display());
             return;
         }
     }
-    // Also try to find from python site-packages if available
+
+    // 2. Check Python environments (local user, virtual envs, etc.)
+    let mut search_dirs = Vec::new();
+
     if let Ok(home) = std::env::var("HOME") {
-        let python_candidates = [
-            format!("{}/.local/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so", home),
-            format!("{}/.local/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so", home),
-            format!("{}/.local/lib/python3.11/site-packages/onnxruntime/capi/libonnxruntime.so", home),
-        ];
-        for path in python_candidates {
-            if Path::new(&path).exists() {
-                std::env::set_var("ORT_DYLIB_PATH", path);
-                eprintln!("ORT_DYLIB_PATH = {}", path);
+        search_dirs.push(format!("{}/.local/lib", home));
+    }
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        search_dirs.push(format!("{}/lib", venv));
+    }
+    // Relative paths for development/testing
+    search_dirs.push("../pitch/.venv/lib".to_string());
+    search_dirs.push("../../pitch/.venv/lib".to_string());
+    search_dirs.push("./.venv/lib".to_string());
+    search_dirs.push("../.venv/lib".to_string());
+
+    let py_versions = ["python3.13", "python3.12", "python3.11", "python3.10", "python3.9", "python3.8"];
+
+    for base_dir in search_dirs {
+        for py_ver in &py_versions {
+            let capi_path = format!("{}/{}/site-packages/onnxruntime/capi", base_dir, py_ver);
+            if let Some(p) = find_in_dir(&capi_path) {
+                std::env::set_var("ORT_DYLIB_PATH", &p);
+                eprintln!("ORT_DYLIB_PATH = {}", p.display());
                 return;
             }
         }
     }
+
     eprintln!("Warning: 未找到 libonnxruntime, 请设置 ORT_DYLIB_PATH");
 }
 
+#[derive(Clone, serde::Serialize)]
+struct ProgressPayload {
+    progress: f32,
+    stage: String,
+}
+
 #[tauri::command]
-fn init_analyzer(app_handle: tauri::AppHandle, app_state: tauri::State<AppState>) -> Result<String, String> {
+async fn init_analyzer(app_handle: tauri::AppHandle, app_state: tauri::State<'_, AppState>) -> Result<String, String> {
     try_init_ort_dylib();
     let (config_path, model_path) = find_model_files(&app_handle)
         .ok_or_else(|| "找不到 models/fcpe.onnx 或 fcpe_config.json".to_string())?;
@@ -115,9 +153,14 @@ fn init_analyzer(app_handle: tauri::AppHandle, app_state: tauri::State<AppState>
 }
 
 #[tauri::command]
-fn analyze_audio(app_state: tauri::State<AppState>, audio_path: String, params: AnalysisParams) -> Result<PitchTrack, String> {
-    let guard = app_state.analyzer.lock().unwrap();
-    let analyzer = guard.as_ref().ok_or_else(|| "Analyzer 尚未初始化".to_string())?;
+async fn analyze_audio(
+    app_handle: tauri::AppHandle,
+    app_state: tauri::State<'_, AppState>,
+    audio_path: String,
+    params: AnalysisParams,
+) -> Result<PitchTrack, String> {
+    use tauri::Emitter;
+
     let config = AnalyzerConfig {
         confidence_threshold: params.confidence_threshold,
         fmin: params.fmin,
@@ -126,7 +169,20 @@ fn analyze_audio(app_state: tauri::State<AppState>, audio_path: String, params: 
         median_smoothing: params.median_smoothing as usize,
         quantize: params.quantize,
     };
-    let track = analyzer.analyze(&audio_path, &config).map_err(|e| format!("分析失败: {}", e))?;
+
+    let track = {
+        let guard = app_state.analyzer.lock().unwrap();
+        let analyzer = guard.as_ref().ok_or_else(|| "Analyzer 尚未初始化".to_string())?;
+        let app_handle_clone = app_handle.clone();
+        
+        analyzer.analyze(&audio_path, &config, move |progress, stage| {
+            let _ = app_handle_clone.emit("analysis-progress", ProgressPayload {
+                progress,
+                stage: stage.to_string(),
+            });
+        }).map_err(|e| format!("分析失败: {}", e))?
+    };
+
     // 加载到播放器
     if let Some(player) = app_state.player.lock().unwrap().as_ref() {
         let _ = player.load(&audio_path);

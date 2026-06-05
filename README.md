@@ -1,10 +1,14 @@
+<a id="top"></a>
+
 <div align="center">
 
 # 🎵 Pitch Analyzer / 人声音高测量工具
 
-**基于深度学习的人声音高分析与可视化工具**
+**An intelligent desktop application for vocal pitch analysis, visualization, and karaoke subtitle labeling.**
 
-[FCPE](https://github.com/CNChTu/FCPE) 音高引擎 · Tauri 2 + Rust · 跨平台桌面应用
+**基于 AI 深度学习的人声音高分析、钢琴卷帘可视化与卡拉OK歌词自动对齐工具。**
+
+[FCPE](https://github.com/CNChTu/FCPE) Pitch Engine · Tauri 2 + Rust · Cross-Platform Desktop App
 
 [English](#english) · [中文](#中文)
 
@@ -12,620 +16,295 @@
 
 ---
 
+## 📖 Table of Contents / 目录
+
+<details open>
+<summary><b>English Table of Contents</b></summary>
+
+- [🎯 What Is This?](#what-is-this)
+- [✨ Key Features](#key-features)
+- [🚀 Quick Start (For Users)](#quick-start-for-users)
+  - [Prerequisites](#prerequisites)
+  - [Step 1: Download & Install](#step-1-download--install)
+  - [Step 2: Load the AI Model](#step-2-load-the-ai-model)
+  - [Step 3: Setup ONNX Runtime](#step-3-setup-onnx-runtime)
+- [🎮 Step-by-Step Tutorial](#step-by-step-tutorial)
+- [⚙️ Parameter Tuning (Plain English)](#parameter-tuning-plain-english)
+- [🔧 Easy Troubleshooting](#easy-troubleshooting)
+- [💻 For Developers (Compiling from Source)](#for-developers-compiling-from-source)
+
+</details>
+
+<details open>
+<summary><b>中文目录</b></summary>
+
+- [🎯 这是什么？](#%E8%BF%99%E6%98%AF%E4%BB%80%E4%B9%88-1)
+- [✨ 核心功能](#%E6%A0%B8%E5%BF%83%E5%8A%9F%E8%83%BD)
+- [🚀 快速上手（小白指南）](#%E5%BF%AB%E9%80%9F%E4%B8%8A%E6%89%8B%E5%B0%8F%E7%99%BD%E6%8C%87%E5%8D%97)
+  - [准备工作](#准备工作)
+  - [第一步：下载与安装](#第一步%E4%B8%8B%E8%BD%BD%E4%B8%8E%E5%AE%89%E8%A3%85)
+  - [第二步：配置 AI 模型文件](#第二步%E9%85%8D%E7%BD%AE-ai-%E6%A8%A1%E5%9E%8B%E6%96%87%E4%BB%B6)
+  - [第三步：配置 ONNX 运行环境](#第三步%E9%85%8D%E7%BD%AE-onnx-%E8%BF%90%E8%A1%8C%E7%8E%AF%E5%A2%83)
+- [🎮 傻瓜式使用教程](#%E5%82%BB%E7%93%9C%E5%BC%8F%E4%BD%BF%E7%94%A8%E6%95%99%E7%A8%8B)
+- [⚙️ 常用参数大白话翻译](#%E5%B8%B8%E7%94%A8%E5%8F%82%E6%95%B0%E5%A4%A7%E7%99%BD%E8%AF%9D%E7%BF%BB%E8%AF%91)
+- [🔧 常见问题与自助排查](#%E5%B8%B8%E8%A7%85%E9%97%AE%E9%A2%98%E4%B8%8E%E8%87%AA%E5%8A%A9%E6%8E%92%E6%9F%A5)
+- [💻 开发者专区（源码编译与调试）](#%E5%BC%80%E5%8F%91%E8%85%85%E4%B8%93%E5%8C%BA%E6%BA%90%E7%A0%81%E7%BC%96%E8%AF%91%E4%B8%8E%E8%B0%83%E8%AF%95)
+
+</details>
+
+---
+
 <a id="english"></a>
 
 ## 🎯 What Is This?
 
-Pitch Analyzer is a desktop app that detects the pitch (fundamental frequency) of vocal tracks in audio files. It uses the **FCPE** deep learning model to achieve high-accuracy pitch estimation, even on clean vocals without instrumental accompaniment.
+**Pitch Analyzer** is a friendly desktop software that automatically extracts and visualizes the notes and pitch curve of your singing. Using state-of-the-art **FCPE** deep learning AI, it listens to your raw vocal recording, traces the frequency, snaps the pitch to musical notes, and helps you easily align lyrics to build karaoke subtitles.
 
-Think of it as: **import a song → see every note the singer sings, quantized to MIDI, with a piano-roll visualization and karaoke-style lyric display.**
-
-### Key Features
-
-| Feature | Description |
-|---------|-------------|
-| 🔬 **FCPE Pitch Detection** | State-of-the-art vocal pitch estimation via ONNX Runtime (CPU) |
-| 🎹 **Piano Roll Visualization** | Real-time pitch curve on a piano-key background with play cursor |
-| 🎤 **Karaoke Lyrics** | LRC (bilingual) / TXT lyric import with per-character note labels |
-| 📋 **SRT Export** | Subtitle files with note names per lyric token (e.g. `Hello [C4]`) |
-| 💾 **Project Save/Load** | JSON project files for later re-opening |
-| ▶️ **Built-in Playback** | Play/pause/seek with synchronized visual cursor |
-| ⚙️ **Presets & Tuning** | Pop / Folk / Classical presets + fine-grained parameter control |
+If you are a **singer**, **content creator**, or **vocal tuner**, this is your go-to companion:
+> Import your audio ➜ Watch notes appear on a beautiful piano roll ➜ Import lyrics ➜ Play & export synced CJK/English subtitles (SRT) with notes.
 
 ---
 
-## 📸 Screenshots
+## ✨ Key Features
 
-> *(Insert screenshots here after first release)*
+- 🔬 **Highly Accurate AI Pitch Tracking** — Powered by the FCPE model via ONNX Runtime. Perfect even on quiet/noisy acapella tracks.
+- 🎹 **Visual Piano Roll** — A scrolling view showing your pitch curve aligned over piano keys with a real-time playback cursor.
+- 🎤 **Karaoke Lyrics Sync** — Import LRC (with/without translations) or plain text TXT. The app automatically splits CJK/English characters and highlights them in sync.
+- 📋 **One-Click Subtitle Export (SRT)** — Generates subtitle tracks with note annotations (e.g. `Hello [C4]`) for video editing.
+- 💾 **Project Save/Load** — Save your workspace into a single JSON project file and reopen it anytime.
+
+<p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Start (For Users)
 
 ### Prerequisites
 
-| Dependency | Version | Why |
-|-----------|---------|-----|
-| [Node.js](https://nodejs.org/) | 20+ | Frontend build tooling |
-| [pnpm](https://pnpm.io/) | 9+ | Package manager |
-| [Rust](https://rustup.rs/) | 1.75+ | Backend language |
-| System libs (Linux) | — | GTK3, WebKit2GTK, etc. (see below) |
-| ONNX Runtime | 1.17+ | ML inference engine |
+| System | Recommended Setup |
+|--------|-------------------|
+| **Windows** | Windows 10 or 11 |
+| **Linux** | Ubuntu / Arch / Fedora (with GTK3 libraries) |
 
-### Step 1: Install System Dependencies
+### Step 1: Download & Install
+Download the installer or binary for your operating system from the **GitHub Releases** page:
+* **Windows**: Run the `.exe` setup wizard.
+* **Linux**: Download the `.AppImage` (make it executable via `chmod +x`) or install the `.deb` package.
 
-**Linux (Debian/Ubuntu):**
-```bash
-sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+### Step 2: Load the AI Model
+Because AI models are too large to host on source code, you need to place them manually:
+1. Create a folder named `models` in the same directory as the executable file.
+2. Put these two files inside the `models` folder:
+   - `fcpe.onnx` (the main AI model file, ~43 MB)
+   - `fcpe_config.json` (the model configuration parameters, ~8 KB)
+
+### Step 3: Setup ONNX Runtime
+The app uses ONNX Runtime to accelerate calculations.
+* **Windows**: Ready to run out-of-the-box.
+* **Linux**: Install it via Python:
+  ```bash
+  pip install onnxruntime
+  ```
+  The app will automatically detect it. If you get a warning, set this environment variable:
+  ```bash
+  export ORT_DYLIB_PATH=/path/to/libonnxruntime.so
+  ```
+
+<p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
+
+---
+
+## 🎮 Step-by-Step Tutorial
+
+```
+1. Import Audio ➜ 2. Fine-tune Pitch ➜ 3. Load Lyrics ➜ 4. Preview Playback ➜ 5. Export SRT
 ```
 
-**Linux (Arch/Manjaro):**
-```bash
-sudo pacman -S gtk3 webkit2gtk-4.1 libappindicator-gtk3 librsvg
-```
+1. **Import Audio**: Click the blue **"📂 Import Audio & Analyze"** button. The app will decode and resample your file, run the AI model, and draw the green pitch curve on the piano roll. An analysis progress bar at the bottom will keep you updated.
+2. **Parameters & Presets**: If your singer's voice is high or low, or has noise, select a preset in the sidebar:
+   - **Pop**: Good for standard pop/rock vocal tracks.
+   - **Folk**: Good for solo acoustic or clean acapellas.
+   - **Classical**: Snaps pitches to exact piano notes (Quantized).
+3. **Add Lyrics**: Click **"🎵 Import LRC"** (recommended for synced lyrics) or **"📝 Import TXT"**. The words will align with the notes. Active syllables will glow green as they play!
+4. **Playback**: Press the play (▶) button. You can slide the progress bar or change volume.
+5. **Export Subtitles**: Click **"📋 Export SRT"** to save your annotated subtitles. Drag the SRT file into Premiere, CapCut, or DaVinci Resolve!
 
-**Windows:**
-No extra system libs needed. Install [Visual Studio C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) if you don't have them.
+<p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 
-### Step 2: Get the FCPE Model
+---
 
-The app needs an FCPE model in ONNX format. You have two options:
+## ⚙️ Parameter Tuning (Plain English)
 
-**Option A — Export from the Python prototype** (if you have the original `torchfcpe` package):
-```bash
-cd /path/to/original/pitch/project
-uv run export_fcpe_onnx.py --output-dir /path/to/pitch-analyzer-tauri/models
-```
+- **Confidence Threshold**: The "cutoff" filter. Lower values (e.g., `0.15`) detect softer vocal details but might pick up background noise. Higher values (e.g., `0.40`) only keep very clean, loud singing.
+- **Min/Max Frequency (Hz)**: Limit the range to match the singer's vocal range (e.g. Bass vs Soprano) to filter out high-frequency noise or low-frequency rumbling.
+- **Peak Filtering (Median)**: Removes sudden pitch spikes caused by glitches or breaths.
+- **Curve Smoothing**: Smooths out natural voice vibrato to make the pitch track cleaner.
+- **Quantize to Semitone**: Snaps your pitch line directly to the nearest piano keys, turning fluid slides into distinct musical notes.
 
-**Option B — Use pre-exported model files:**
-Place these two files in the `models/` folder at the project root:
-- `fcpe.onnx` — the ONNX model file (~43 MB)
-- `fcpe_config.json` — model configuration with cent table (~8 KB)
+<p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 
-> 📌 The `models/` folder should sit next to `package.json`.
+---
 
-### Step 3: Install ONNX Runtime
+## 🔧 Easy Troubleshooting
 
-The app needs the ONNX Runtime shared library at runtime.
+### ❌ "找不到 models/fcpe.onnx" (Model Not Found)
+Make sure the `models/` folder sits exactly next to the application executable, containing both `fcpe.onnx` and `fcpe_config.json`.
 
-**Option A — Via pip** (easiest on Linux, reuses an existing venv):
-```bash
-pip install onnxruntime
-# The .so file is at: ~/.local/lib/python3.X/site-packages/onnxruntime/capi/libonnxruntime.so.X.Y.Z
-```
+### ❌ "未找到 libonnxruntime" (ONNX Runtime Not Found - Linux)
+Run `pip install onnxruntime` in your system. If you are using a virtual environment, start the app from that terminal environment.
 
-**Option B — Download manually:**
-1. Go to [onnxruntime releases](https://github.com/microsoft/onnxruntime/releases)
-2. Download `onnxruntime-linux-x64-1.20.0.tgz` (or latest)
-3. Extract and note the path to `lib/libonnxruntime.so`
+### ❌ The Play button is disabled
+You must click "Import Audio & Analyze" and wait for the analysis progress bar to finish (reaching 100%) before playback is unlocked.
 
-The app will try to auto-detect the library from common locations. If it can't find it, set the environment variable:
-```bash
-export ORT_DYLIB_PATH=/path/to/libonnxruntime.so
-```
+<p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 
-### Step 4: Install & Run
+---
+
+## 💻 For Developers (Compiling from Source)
+
+If you wish to compile or modify the application, follow these developer commands:
 
 ```bash
-# Clone and enter the project
-cd pitch-analyzer-tauri
-
-# Install frontend dependencies
+# 1. Install frontend dependencies
 pnpm install
 
-# Start the development app
+# 2. Run in development mode
 pnpm tauri dev
-```
 
-The app window should open. Click **"📂 Import Audio & Analyze"** to load a WAV/FLAC/MP3/OGG file.
+# 3. Run Rust backend tests
+cargo test --manifest-path src-tauri/Cargo.lock
 
----
-
-## 🎮 How to Use
-
-### Basic Workflow
-
-```
-Import Audio → Analyze → (Optional: Import Lyrics) → Play / Export
-```
-
-1. **Import Audio**: Click the blue button or drag a file. The app will:
-   - Decode the audio to 16 kHz mono
-   - Compute mel spectrogram
-   - Run FCPE inference
-   - Apply DSP post-processing (Hampel → Median → Savitzky-Golay)
-   - Display the pitch curve on the piano roll
-
-2. **Adjust Parameters**: Use presets (Pop/Folk/Classical) or fine-tune:
-   - **Confidence Threshold** — lower = more notes detected, but more false positives
-   - **Fmin / Fmax** — frequency range to keep
-   - **Median Filter** — removes pitch spikes
-   - **Savitzky-Golay** — smooths the pitch curve
-   - **Quantize** — snap pitch to nearest semitone
-
-3. **Import Lyrics**: Load an LRC file (with timestamps) or plain TXT.
-   - LRC supports bilingual lyrics (same timestamp = merged as translation)
-   - Lyrics are automatically time-aligned and pitch-bound
-
-4. **Playback**: Use ▶/⏸ and the progress slider. The red cursor follows the pitch.
-
-5. **Export**:
-   - **SRT** — subtitle file with note names per lyric character
-   - **Project JSON** — save everything for later re-opening
-
-### Parameter Presets
-
-| Preset | Best For | Confidence | Smoothing | Quantize |
-|--------|----------|------------|-----------|----------|
-| **Pop** | Pop, rock, J-pop vocals | 0.30 | 15 / 11 | Off |
-| **Folk** | Acoustic, a cappella | 0.25 | 17 / 13 | Off |
-| **Classical** | Opera, choral | 0.20 | 21 / 15 | On |
-
----
-
-## 🏗️ Architecture
-
-```
-┌──────────────────────────────────────────────┐
-│  Web Frontend (TypeScript + Canvas)          │
-│  ├─ Piano Roll + Pitch Curve (Canvas 2D)    │
-│  ├─ Karaoke Lyrics Display (DOM)            │
-│  ├─ Playback Controls                        │
-│  └─ Parameter Panel + File Operations        │
-├──────────────────────────────────────────────┤
-│  Tauri 2 IPC (invoke commands)               │
-├──────────────────────────────────────────────┤
-│  Rust Backend                                │
-│  ├─ Audio Decode (symphonia → 16k mono)     │
-│  ├─ Mel Spectrogram (librosa-compatible)     │
-│  ├─ FCPE ONNX Inference (ort crate)          │
-│  ├─ Local Argmax Decoder (cent_table → f0)   │
-│  ├─ DSP Post-processing (Hampel/Median/Savg) │
-│  ├─ Lyrics Parser + Aligner (LRC/TXT)        │
-│  ├─ Audio Playback (rodio, dedicated thread)  │
-│  └─ SRT Export + Project Serialization        │
-└──────────────────────────────────────────────┘
-```
-
-### File Map
-
-| File | Purpose |
-|------|---------|
-| `src/main.ts` | App entry point, all Tauri command calls |
-| `src/pitch_canvas.ts` | Piano roll + pitch curve renderer |
-| `src/karaoke_display.ts` | Karaoke lyric display |
-| `src/types.ts` | Analysis params, presets |
-| `src-tauri/src/lib.rs` | Tauri commands (16 total) + app state |
-| `src-tauri/src/analyzer.rs` | FCPE pipeline orchestrator |
-| `src-tauri/src/audio.rs` | Audio decode + resample |
-| `src-tauri/src/mel.rs` | Mel spectrogram (STFT + mel filterbank) |
-| `src-tauri/src/decoder.rs` | FCPE local_argmax decoder |
-| `src-tauri/src/dsp.rs` | Pitch post-processing filters |
-| `src-tauri/src/playback.rs` | Audio player (rodio, thread-isolated) |
-| `src-tauri/src/lyrics.rs` | LRC/TXT parser + aligner + SRT export |
-| `src-tauri/src/models.rs` | Data structures |
-
----
-
-## 🧪 Testing
-
-```bash
-cd src-tauri
-
-# Core pipeline tests (mel accuracy, ONNX inference, e2e with real audio)
-ORT_DYLIB_PATH=/path/to/libonnxruntime.so cargo test --test integration -- --nocapture
-
-# Lyrics parsing tests
-cargo test --test lyrics_test -- --nocapture
-
-# SRT export tests
-cargo test --test srt_test -- --nocapture
-
-# Run all tests
-ORT_DYLIB_PATH=/path/to/libonnxruntime.so cargo test -- --nocapture
-```
-
-### Test Coverage
-
-| Test | What It Checks |
-|------|---------------|
-| `test_mel_matches_python` | Rust mel spectrogram vs Python reference (max diff < 2e-5) |
-| `test_onnx_inference_matches_python` | ONNX output vs PyTorch (max diff < 2e-7) |
-| `test_decoder_produces_f0` | FCPE local_argmax produces valid f0 values |
-| `test_end_to_end_real_audio` | Full pipeline on a 5-min FLAC |
-| `test_tokenize_mixed` | CJK + English tokenization |
-| `test_parse_lrc_*` | LRC parsing, bilingual merge |
-| `test_export_srt_*` | SRT output with/without lyrics |
-
----
-
-## 📦 Building for Distribution
-
-```bash
+# 4. Build release package
 pnpm tauri build
 ```
 
-Output will be in `src-tauri/target/release/bundle/`.
-
-> ⚠️ For distribution, you need to either:
-> 1. Bundle `libonnxruntime.so` alongside the binary, or
-> 2. Instruct users to install ONNX Runtime separately
->
-> The model files (`fcpe.onnx`, `fcpe_config.json`) must also be in the `models/` directory relative to the executable.
-
----
-
-## 🔧 Troubleshooting
-
-### "找不到 models/fcpe.onnx"
-
-The model files are not included in the repo (too large). See [Step 2](#step-2--get-the-fcpe-model) above.
-
-### "ORT_DYLIB_PATH not set" / "未找到 libonnxruntime"
-
-The app can't find the ONNX Runtime shared library. Set it explicitly:
-```bash
-export ORT_DYLIB_PATH=/path/to/libonnxruntime.so.1.20.0
-```
-
-### Port 1420 already in use
-
-Another Tauri dev instance is running. Kill it:
-```bash
-lsof -ti :1420 | xargs kill -9
-```
-
-### Audio decode is slow for large files
-
-The resampler (rubato) processes the entire file at once. For files > 10 minutes, decoding may take 30-60 seconds. This will be improved in a future release with chunked processing.
-
-### Build fails on Linux: "cannot find -lgtk-3"
-
-Install GTK3 development headers:
-```bash
-# Debian/Ubuntu
-sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
-
-# Arch
-sudo pacman -S gtk3 webkit2gtk-4.1 libappindicator-gtk3 librsvg
-```
-
----
-
-## 📊 Performance
-
-Measured on a 5-minute FLAC (vocals, 16 kHz, ~31400 frames):
-
-| Stage | Time |
-|-------|------|
-| Audio decode + resample | ~20s |
-| Mel spectrogram | ~8s |
-| FCPE ONNX inference | **~2.4s** |
-| DSP post-processing | ~0.4s |
-| **Total** | **~31s** |
-
-> ONNX inference is **faster than PyTorch eager mode** on the same CPU.
-
----
-
-## 📜 License
-
-This project is for personal and educational use. The FCPE model is from [torchfcpe](https://github.com/CNChTu/FCPE) — please check its license for commercial use.
+<p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 
 ---
 
 <a id="中文"></a>
 
----
-
-<div align="center">
-
-# 🎵 人声音高测量工具
-
-**基于深度学习的人声音高分析与可视化桌面应用**
-
-</div>
-
 ## 🎯 这是什么？
 
-这是一款桌面应用，可以检测音频文件中**人声的音高（基频）**。它使用 **FCPE** 深度学习模型实现高精度音高估计，即使在没有伴奏的清唱人声上也能准确工作。
+**人声音高测量工具** 是一款专为歌手、音视频创作者和修音师设计的桌面应用。它可以通过 AI 自动提取并可视化您录音中人声的音高曲线。
 
-简单来说：**导入一首歌 → 看到歌手唱的每一个音符，量化为 MIDI 编号，有钢琴卷帘可视化和卡拉OK 歌词显示。**
+基于先进的 **FCPE** 深度学习模型，它能智能识别清唱人声，提取频率并自动对齐 MIDI 音符，最终协助您完成精细化的卡拉OK歌词标注与字幕制作。
 
-### 核心功能
-
-| 功能 | 说明 |
-|------|------|
-| 🔬 **FCPE 音高检测** | 基于 ONNX Runtime 的 SOTA 人声音高估计（CPU 推理） |
-| 🎹 **钢琴卷帘可视化** | 实时音高曲线 + 钢琴键背景 + 播放光标 |
-| 🎤 **卡拉OK 歌词** | 支持 LRC（含双语合并）/ TXT 歌词导入，每字标注音符 |
-| 📋 **SRT 字幕导出** | 每个歌词字对应音符名（如 `你 [C4]`） |
-| 💾 **项目保存/加载** | JSON 格式，随时保存和重新打开分析结果 |
-| ▶️ **内置播放器** | 播放/暂停/跳转，光标同步跟踪 |
-| ⚙️ **预设与微调** | 流行/民谣/古典预设 + 细粒度参数调节 |
+> 导入音频 ➜ 钢琴卷帘窗实时显示音轨 ➜ 导入歌词 ➜ 随心播放并一键导出带音高标注的双语字幕（SRT）。
 
 ---
 
-## 🚀 快速开始
+## ✨ 核心功能
 
-### 你需要先安装的东西
+- 🔬 **极准的 AI 音高跟踪** — 基于 FCPE 模型与 ONNX Runtime 硬件加速，干净人声和略带底噪的清唱皆可精准感应。
+- 🎹 **直观的钢琴卷帘窗** — 绿色的音高曲线在钢琴键背景上一目了然，带播放光标指示。
+- 🎤 **卡拉OK 歌词自动对齐** — 导入 LRC（支持双语合并）或 TXT 文本，程序自动分词并对齐，播放时唱到的字会变成**青色并微微放大发光**。
+- 📋 **一键导出 SRT 字幕** — 导出带音名标注（如 `你好 [C4]`）的字幕文件，方便导入各大视频剪辑软件。
+- 💾 **项目工程存取** — 支持将所有分析参数和对齐歌词保存为 JSON 工程文件，下次直接打开。
 
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| [Node.js](https://nodejs.org/) | 20+ | 前端构建 |
-| [pnpm](https://pnpm.io/) | 9+ | 包管理器 |
-| [Rust](https://rustup.rs/) | 1.75+ | 后端语言 |
-| 系统库 (Linux) | — | GTK3 等（见下方） |
-| ONNX Runtime | 1.17+ | AI 推理引擎 |
+<p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 
-> 💡 **小白提示**：Rust 安装只需一行命令：`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+---
 
-### 第一步：安装系统依赖
+## 🚀 快速上手（小白指南）
 
-**Linux (Debian/Ubuntu)：**
-```bash
-sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+### 准备工作
+
+| 操作系统 | 推荐环境 |
+|--------|-------------------|
+| **Windows** | Windows 10 或 11 |
+| **Linux** | Ubuntu / Arch / Fedora (需安装 GTK3 依赖) |
+
+### 第一步：下载与安装
+在项目的 **GitHub Releases** 页面下载安装包：
+* **Windows**：下载 `.exe` 安装包并点击下一步完成安装。
+* **Linux**：下载 `.AppImage`（右键添加可执行权限即可运行）或 `.deb` 安装包。
+
+### 第二步：配置 AI 模型文件
+由于 AI 模型文件太大，我们没有将其打包进源码库。请在**可执行程序同级目录**下：
+1. 新建一个名为 `models` 的文件夹。
+2. 将以下两个模型文件放入 `models` 中：
+   - `fcpe.onnx`（音高检测模型，约 43 MB）
+   - `fcpe_config.json`（模型配置文件，约 8 KB）
+
+### 第三步：配置 ONNX 运行环境
+应用依赖 ONNX Runtime 来运行模型。
+* **Windows**：无需额外配置，开箱即用。
+* **Linux**：建议在系统中通过 pip 安装运行库：
+  ```bash
+  pip install onnxruntime
+  ```
+  应用会自动尝试在系统中搜寻该运行库。如果运行提示未找到，可以手动设置环境变量：
+  ```bash
+  export ORT_DYLIB_PATH=/你的路径/libonnxruntime.so
+  ```
+
+<p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
+
+---
+
+## 🎮 傻瓜式使用教程
+
+```
+导入人声音频 ➜ 侧边栏微调音高 ➜ 导入歌词对照 ➜ 随心试听 ➜ 导出带音高字幕
 ```
 
-**Linux (Arch/Manjaro)：**
-```bash
-sudo pacman -S gtk3 webkit2gtk-4.1 libappindicator-gtk3 librsvg
-```
+1. **导入音频**：点击左侧蓝色的 **"📂 导入音频并分析"** 按钮，选择人声录音。侧边栏底部会出现进度条，显示解码、推理等进度。分析完成后，钢琴卷帘窗上会出现绿色的音高曲线。
+2. **选择适合的预设**：侧边栏上方有快捷预设按钮：
+   - **流行**：适配绝大多数流行与摇滚人声。
+   - **民谣**：适配比较干净的民谣清唱、弹唱人声。
+   - **古典**：适配美声或合唱，音高线会自动吸附到钢琴键上。
+3. **导入歌词**：点击 **"🎵 导入 LRC"**（带时间戳的歌词文件）或 **"📝 导入 TXT"**（纯文本）。歌词会显示在顶部面板，播放时唱到的字会变成**青色并微微放大发光**。
+4. **播放试听**：点击下方的播放按钮 (▶) 即可试听。拖拽滚动条可以调节音轨进度，拖动音量条调节音量大小。
+5. **导出成果**：点击 **"📋 导出 SRT"**，可直接将带音名字幕保存到本地。导入剪辑软件（如剪映、PR、FCP）即可制作出带有音符提示的高档卡拉OK字幕！
 
-**Windows：**
-不需要额外系统库。确保已安装 [Visual Studio C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)。
+<p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 
-### 第二步：获取 FCPE 模型
+---
 
-应用需要 FCPE 模型的 ONNX 格式文件。两种方式：
+## ⚙️ 常用参数大白话翻译
 
-**方式 A — 从 Python 原型导出**（如果你有原来的 `torchfcpe` 包）：
-```bash
-cd /path/to/original/pitch/project
-uv run export_fcpe_onnx.py --output-dir /path/to/pitch-analyzer-tauri/models
-```
+- **置信度阈值**：音高感应的灵敏度。越低越灵敏（如 `0.15` 会检测到细微的换气或微弱的尾音，但容易引入杂音）；越高越保守（如 `0.40` 只保留唱得非常清晰响亮的部分）。
+- **最低/最高频率 (Hz)**：限制歌手的声部范围（例如男低音 vs 女高音），有效过滤高频杂音或低频风声。
+- **峰值过滤 (中值)**：自动剔除音高中由于喷麦、呼吸引起的突变尖峰。
+- **曲线平滑**：消减歌手嗓音中细微的多余抖动和颤音，让线条更平滑。
+- **对齐到半音**：开启后，滑动音高会变成类似于琴键的一格格阶梯，自动归类到最邻近的音符上。
 
-**方式 B — 直接放置模型文件：**
-将以下两个文件放到项目根目录的 `models/` 文件夹中：
-- `fcpe.onnx` — ONNX 模型文件（约 43 MB）
-- `fcpe_config.json` — 模型配置（含 cent 表，约 8 KB）
+<p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 
-> 📌 `models/` 文件夹应该和 `package.json` 在同一层级。
+---
 
-### 第三步：安装 ONNX Runtime
+## 🔧 常见问题与自助排查
 
-应用运行时需要 ONNX Runtime 动态库。
+### ❌ 提示 "找不到 models/fcpe.onnx"
+请确保 `models` 文件夹和您运行的程序在同一目录层级下，并且里面包含有 `fcpe.onnx` 以及 `fcpe_config.json` 两个文件。
 
-**方式 A — 通过 pip 安装**（Linux 最简单，复用现有 venv）：
-```bash
-pip install onnxruntime
-# .so 文件位置：~/.local/lib/python3.X/site-packages/onnxruntime/capi/libonnxruntime.so.X.Y.Z
-```
+### ❌ 提示 "未找到 libonnxruntime" (Linux)
+请确认您是否运行过 `pip install onnxruntime`。如果是，请确保在运行应用时能访问到 Python 包环境。
 
-**方式 B — 手动下载：**
-1. 前往 [onnxruntime releases](https://github.com/microsoft/onnxruntime/releases)
-2. 下载 `onnxruntime-linux-x64-1.20.0.tgz`（或最新版）
-3. 解压并记下 `lib/libonnxruntime.so` 的路径
+### ❌ 为什么播放按钮点不了？
+您必须先成功“导入音频并分析”，等底部的分析进度条走到 100% 后，播放控制才会解锁。
 
-应用会尝试从常见路径自动检测。如果找不到，设置环境变量：
-```bash
-export ORT_DYLIB_PATH=/path/to/libonnxruntime.so
-```
+<p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 
-### 第四步：安装依赖并运行
+---
+
+## 💻 开发者专区（源码编译与调试）
+
+如果您需要调试源码或自主编译构建，请使用以下命令：
 
 ```bash
-# 进入项目目录
-cd pitch-analyzer-tauri
-
-# 安装前端依赖
+# 1. 安装前端所需依赖
 pnpm install
 
-# 启动开发版应用
+# 2. 启动前端和 Tauri 的开发模式
 pnpm tauri dev
-```
 
-应用窗口会弹出来。点击蓝色的 **「📂 导入音频并分析」** 按钮加载 WAV/FLAC/MP3/OGG 文件即可。
+# 3. 运行 Rust 后端自动化测试
+cargo test --manifest-path src-tauri/Cargo.lock
 
----
-
-## 🎮 使用说明
-
-### 基本流程
-
-```
-导入音频 → 分析 → （可选：导入歌词）→ 播放 / 导出
-```
-
-1. **导入音频**：点击蓝色按钮或拖入文件。应用会自动：
-   - 解码音频为 16 kHz 单声道
-   - 计算 Mel 频谱
-   - 运行 FCPE 推理
-   - 应用后处理（Hampel 滤波 → 中值滤波 → Savitzky-Golay 平滑）
-   - 在钢琴卷帘上显示音高曲线
-
-2. **调节参数**：使用预设（流行/民谣/古典）或手动调节：
-   - **置信阈值** — 越低检测到的音符越多，但误检也会增加
-   - **最低/最高频率** — 保留的频率范围
-   - **峰值过滤** — 去除音高突变点
-   - **曲线平滑** — 平滑音高曲线
-   - **对齐半音** — 将音高吸附到最近的半音
-
-3. **导入歌词**：加载 LRC（带时间戳）或纯 TXT 文件。
-   - LRC 支持双语歌词（相同时间戳的行会自动合并为翻译）
-   - 歌词会自动分配每字时间并绑定音高
-
-4. **播放**：使用 ▶/⏸ 按钮和进度条。红色光标会跟随当前播放位置。
-
-5. **导出**：
-   - **SRT 字幕** — 每个歌词字对应一个音符名
-   - **项目 JSON** — 保存所有分析结果，下次可以直接打开
-
-### 参数预设说明
-
-| 预设 | 适用场景 | 置信阈值 | 平滑 | 量化 |
-|------|---------|---------|------|------|
-| **流行** | 流行、摇滚、J-POP 人声 | 0.30 | 15 / 11 | 关 |
-| **民谣** | 民谣、清唱、吉他弹唱 | 0.25 | 17 / 13 | 关 |
-| **古典** | 美声、合唱、古典声乐 | 0.20 | 21 / 15 | 开 |
-
----
-
-## 🏗️ 技术架构
-
-```
-┌──────────────────────────────────────────────┐
-│  Web 前端 (TypeScript + Canvas)              │
-│  ├─ 钢琴卷帘 + 音高曲线 (Canvas 2D)         │
-│  ├─ 卡拉OK 歌词显示 (DOM)                    │
-│  ├─ 播放控制条                                │
-│  └─ 参数面板 + 文件操作                        │
-├──────────────────────────────────────────────┤
-│  Tauri 2 IPC (invoke 命令调用)                │
-├──────────────────────────────────────────────┤
-│  Rust 后端                                    │
-│  ├─ 音频解码 (symphonia → 16kHz 单声道)      │
-│  ├─ Mel 频谱计算 (librosa 兼容)               │
-│  ├─ FCPE ONNX 推理 (ort crate)                │
-│  ├─ 局部 Argmax 解码器 (cent_table → f0)      │
-│  ├─ DSP 后处理 (Hampel/中值/Savgol 滤波)      │
-│  ├─ 歌词解析器 + 对齐器 (LRC/TXT)             │
-│  ├─ 音频播放 (rodio, 独立线程)                │
-│  └─ SRT 导出 + 项目序列化                      │
-└──────────────────────────────────────────────┘
-```
-
-### 文件说明
-
-| 文件 | 用途 |
-|------|------|
-| `src/main.ts` | 应用入口，所有 Tauri 命令调用 |
-| `src/pitch_canvas.ts` | 钢琴卷帘 + 音高曲线绘制 |
-| `src/karaoke_display.ts` | 卡拉OK 歌词显示 |
-| `src/types.ts` | 分析参数、预设定义 |
-| `src-tauri/src/lib.rs` | Tauri 命令（共 16 个）+ 应用状态 |
-| `src-tauri/src/analyzer.rs` | FCPE 分析流水线 |
-| `src-tauri/src/audio.rs` | 音频解码 + 重采样 |
-| `src-tauri/src/mel.rs` | Mel 频谱（STFT + Mel 滤波器组） |
-| `src-tauri/src/decoder.rs` | FCPE local_argmax 解码器 |
-| `src-tauri/src/dsp.rs` | 音高后处理滤波器 |
-| `src-tauri/src/playback.rs` | 音频播放器（rodio，线程隔离） |
-| `src-tauri/src/lyrics.rs` | LRC/TXT 解析 + 对齐 + SRT 导出 |
-| `src-tauri/src/models.rs` | 数据结构定义 |
-
----
-
-## 🧪 运行测试
-
-```bash
-cd src-tauri
-
-# 核心流水线测试（Mel 精度、ONNX 推理、真实音频端到端）
-ORT_DYLIB_PATH=/path/to/libonnxruntime.so cargo test --test integration -- --nocapture
-
-# 歌词解析测试
-cargo test --test lyrics_test -- --nocapture
-
-# SRT 导出测试
-cargo test --test srt_test -- --nocapture
-
-# 运行所有测试
-ORT_DYLIB_PATH=/path/to/libonnxruntime.so cargo test -- --nocapture
-```
-
-### 测试覆盖
-
-| 测试 | 验证内容 |
-|------|---------|
-| `test_mel_matches_python` | Rust Mel 频谱与 Python 参考对比（最大误差 < 2e-5） |
-| `test_onnx_inference_matches_python` | ONNX 推理与 PyTorch 对比（最大误差 < 2e-7） |
-| `test_decoder_produces_f0` | FCPE 解码器输出合法 f0 值 |
-| `test_end_to_end_real_audio` | 5 分钟真实 FLAC 全流水线测试 |
-| `test_tokenize_mixed` | 中日英混合分词 |
-| `test_parse_lrc_*` | LRC 解析、双语合并 |
-| `test_export_srt_*` | 有/无歌词的 SRT 导出 |
-
----
-
-## 📦 打包发布
-
-```bash
+# 4. 打包发布应用
 pnpm tauri build
 ```
 
-产物在 `src-tauri/target/release/bundle/` 中。
-
-> ⚠️ 发布版需要：
-> 1. 将 `libonnxruntime.so` 与可执行文件一起打包，或
-> 2. 提示用户自行安装 ONNX Runtime
->
-> 模型文件（`fcpe.onnx`、`fcpe_config.json`）也必须放在可执行文件同级的 `models/` 目录中。
-
----
-
-## 🔧 常见问题
-
-### ❌ "找不到 models/fcpe.onnx"
-
-模型文件不在仓库中（文件太大）。请按上方 [第二步](#第二步获取-fcpe-模型) 操作。
-
-### ❌ "ORT_DYLIB_PATH not set" / "未找到 libonnxruntime"
-
-应用找不到 ONNX Runtime 动态库。请手动设置：
-```bash
-export ORT_DYLIB_PATH=/path/to/libonnxruntime.so.1.20.0
-```
-
-### ❌ 端口 1420 被占用
-
-另一个 Tauri 开发实例正在运行。杀掉它：
-```bash
-lsof -ti :1420 | xargs kill -9
-```
-
-### ❌ 大文件解码很慢
-
-重采样器（rubato）目前是全文件一次性处理。超过 10 分钟的文件可能需要 30-60 秒解码。后续版本会改为分块处理。
-
-### ❌ Linux 编译失败: "cannot find -lgtk-3"
-
-需要安装 GTK3 开发头文件：
-```bash
-# Debian/Ubuntu
-sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
-
-# Arch
-sudo pacman -S gtk3 webkit2gtk-4.1 libappindicator-gtk3 librsvg
-```
-
----
-
-## 📊 性能数据
-
-使用 5 分钟 FLAC 人声（16 kHz，约 31400 帧）测量：
-
-| 阶段 | 耗时 |
-|------|------|
-| 音频解码 + 重采样 | ~20s |
-| Mel 频谱计算 | ~8s |
-| FCPE ONNX 推理 | **~2.4s** |
-| DSP 后处理 | ~0.4s |
-| **总计** | **~31s** |
-
-> ONNX 推理比同一 CPU 上的 PyTorch eager 模式**更快**。
-
----
-
-## 📜 许可证
-
-本项目仅供个人和学习使用。FCPE 模型来自 [torchfcpe](https://github.com/CNChTu/FCPE)——商业使用请查看其许可证。
-
----
-
-## 🙏 致谢
-
-- [FCPE](https://github.com/CNChTu/FCPE) — 音高检测模型
-- [Tauri](https://tauri.app/) — 跨平台桌面应用框架
-- [ONNX Runtime](https://onnxruntime.ai/) — 高性能推理引擎
-- [rodio](https://github.com/RustAudio/rodio) — Rust 音频播放
-- [symphonia](https://github.com/pdeljanov/Symphonia) — Rust 音频解码
+<p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>

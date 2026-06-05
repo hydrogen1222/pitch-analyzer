@@ -34,16 +34,22 @@ impl PitchAnalyzer {
         })
     }
 
-    pub fn analyze(
+    pub fn analyze<F>(
         &self,
         audio_path: &str,
         config: &AnalyzerConfig,
-    ) -> Result<PitchTrack, Box<dyn std::error::Error>> {
+        mut progress_cb: F,
+    ) -> Result<PitchTrack, Box<dyn std::error::Error>>
+    where
+        F: FnMut(f32, &str),
+    {
         // 1. 解码音频 → 16 kHz mono
+        progress_cb(0.1, "解码音频并重采样...");
         let audio = load_audio_16k_mono(Path::new(audio_path))
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
         // 2. mel 频谱 (n_frames, 128)
+        progress_cb(0.4, "计算 Mel 频谱...");
         let mel = self.mel_extractor.compute(&audio.samples);
         let (n_frames, n_mels) = mel.dim();
         if n_frames == 0 {
@@ -51,6 +57,7 @@ impl PitchAnalyzer {
         }
 
         // 3. ONNX 推理: (1, n_frames, 128) → (1, n_frames, 360)
+        progress_cb(0.6, "正在进行 AI 音高估计推理...");
         let mel_3d: Array3<f32> = mel.insert_axis(ndarray::Axis(0));
         let input_tensor = Tensor::from_array(mel_3d)?;
 
@@ -62,9 +69,11 @@ impl PitchAnalyzer {
         let latent_2d = latent.index_axis(ndarray::Axis(0), 0);
 
         // 4. 解码 latent → f0, confidence
+        progress_cb(0.8, "解码音高特征数据...");
         let (f0, conf) = self.decoder.decode(latent_2d, config.confidence_threshold);
 
         // 5. DSP 后处理
+        progress_cb(0.9, "应用 DSP 后处理平滑滤波...");
         let (times, frequencies, midis) = post_process(
             &f0,
             &conf,
@@ -84,6 +93,7 @@ impl PitchAnalyzer {
             .min(midis.len());
 
         let _ = n_mels; // 防止 unused warning
+        progress_cb(1.0, "分析完成");
 
         Ok(PitchTrack {
             times: times[..min_len].to_vec(),

@@ -45,3 +45,24 @@ release/
 .env
 .env.local
 .env.*.local
+
+# Python environments
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ipynb_checkpoints/
+
+# OS specific files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.AppleDouble
+.LSOverride
+
+# Local documentation
+RELEASE_GUIDE.md

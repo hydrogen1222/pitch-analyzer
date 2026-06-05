@@ -62,6 +62,7 @@ fn test_mel_matches_python() {
 
 #[test]
 fn test_onnx_inference_matches_python() {
+    pitch_analyzer_tauri_lib::try_init_ort_dylib();
     let td = load_test_data();
     let ref_mel = &td.mel[0]; // (T, 128)
     let ref_latent = &td.latent[0]; // (T, 360)
@@ -168,6 +169,7 @@ fn test_decoder_produces_f0() {
 
 #[test]
 fn test_end_to_end_real_audio() {
+    pitch_analyzer_tauri_lib::try_init_ort_dylib();
     let audio_path = std::path::Path::new("/tmp/test_vocal.flac");
     if !audio_path.exists() {
         eprintln!("Skipping e2e test: no /tmp/test_vocal.flac");
