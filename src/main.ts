@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open, save, message } from "@tauri-apps/plugin-dialog";
+import { open, save, message, ask } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { PitchCanvas } from "./pitch_canvas";
 import { KaraokeDisplay } from "./karaoke_display";
@@ -44,6 +44,8 @@ let loadProjBtn: HTMLButtonElement | null;
 let exportSrtBtn: HTMLButtonElement | null;
 let pitchFontInput: HTMLInputElement | null;
 let lyricFontInput: HTMLInputElement | null;
+let selectModelBtn: HTMLButtonElement | null;
+let isAnalyzerInitialized = false;
 
 let progressContainerEl: HTMLElement | null = null;
 let progressFillEl: HTMLElement | null = null;
@@ -82,7 +84,10 @@ function getCurrentParams(): AnalysisParams {
 }
 
 function setStatus(text: string) {
-  if (statusEl) statusEl.textContent = text;
+  if (statusEl) {
+    statusEl.textContent = text;
+    statusEl.classList.toggle("warning-link", !isAnalyzerInitialized);
+  }
 }
 
 function enableControls(hasTrack: boolean) {
@@ -112,7 +117,54 @@ function updateCurrentPitch() {
   if (pitchCanvas) pitchCanvas.setTime(state.currentTime);
 }
 
+async function doSelectModel(): Promise<boolean> {
+  try {
+    const modelPath = await open({
+      title: "选择音高模型文件 (fcpe.onnx)",
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Model", extensions: ["onnx"] }],
+    });
+    if (!modelPath) return false;
+
+    const configPath = await open({
+      title: "选择模型配置文件 (fcpe_config.json)",
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Config", extensions: ["json"] }],
+    });
+    if (!configPath) return false;
+
+    setStatus("正在加载外部模型...");
+    await invoke("init_analyzer_with_paths", { configPath, modelPath });
+    isAnalyzerInitialized = true;
+    setStatus("就绪");
+    await message("音高模型加载成功！", { title: "成功", kind: "info" });
+    return true;
+  } catch (e) {
+    console.error("Select model failed:", e);
+    setStatus("加载模型失败");
+    await message("加载模型失败: " + e, { title: "错误", kind: "error" });
+    return false;
+  }
+}
+
 async function doImportAudio() {
+  if (!isAnalyzerInitialized) {
+    const confirmed = await ask("未载入音高模型。是否现在选择外部模型文件？\n\n(提示: 分析歌曲需要 fcpe.onnx 及 fcpe_config.json)", {
+      title: "未载入音高模型",
+      kind: "warning",
+      okLabel: "选择模型",
+      cancelLabel: "取消",
+    });
+    if (confirmed) {
+      const ok = await doSelectModel();
+      if (!ok) return;
+    } else {
+      return;
+    }
+  }
+
   try {
     const selected = await open({
       multiple: false,
@@ -274,10 +326,12 @@ async function initApp() {
 
   try {
     await invoke("init_analyzer");
+    isAnalyzerInitialized = true;
     setStatus("就绪");
   } catch (e) {
     console.error("Init failed:", e);
-    setStatus("初始化失败");
+    isAnalyzerInitialized = false;
+    setStatus("未载入音高模型 (点击选择)");
   }
 
   try {
@@ -320,6 +374,7 @@ async function initApp() {
   exportSrtBtn = document.querySelector("#export-srt");
   pitchFontInput = document.querySelector("#font-pitch");
   lyricFontInput = document.querySelector("#font-lyric");
+  selectModelBtn = document.querySelector("#select-model");
 
   progressContainerEl = document.querySelector("#progress-container");
   progressFillEl = document.querySelector("#progress-fill");
@@ -356,6 +411,12 @@ async function initApp() {
   saveProjBtn?.addEventListener("click", doSaveProject);
   loadProjBtn?.addEventListener("click", doLoadProject);
   exportSrtBtn?.addEventListener("click", doExportSrt);
+  selectModelBtn?.addEventListener("click", () => { doSelectModel(); });
+  statusEl?.addEventListener("click", () => {
+    if (!isAnalyzerInitialized) {
+      doSelectModel();
+    }
+  });
 
   // Playback
   playBtn?.addEventListener("click", async () => {

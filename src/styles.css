@@ -217,6 +217,12 @@ body {
   color: var(--text-muted);
 }
 
+.status.warning-link {
+  color: #ff5252;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .main-area {
   flex: 1;
   display: flex;

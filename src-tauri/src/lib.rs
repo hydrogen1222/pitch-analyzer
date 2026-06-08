@@ -131,11 +131,64 @@ struct ProgressPayload {
     stage: String,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct AppConfig {
+    model_path: String,
+    config_path: String,
+}
+
+fn get_config_path(app_handle: &tauri::AppHandle) -> Option<PathBuf> {
+    app_handle.path().app_config_dir().ok().map(|p| p.join("config.json"))
+}
+
+fn load_stored_config(app_handle: &tauri::AppHandle) -> Option<AppConfig> {
+    let p = get_config_path(app_handle)?;
+    if p.exists() {
+        if let Ok(content) = std::fs::read_to_string(p) {
+            return serde_json::from_str(&content).ok();
+        }
+    }
+    None
+}
+
+fn save_stored_config(app_handle: &tauri::AppHandle, config_path: &str, model_path: &str) {
+    if let Some(p) = get_config_path(app_handle) {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let cfg = AppConfig {
+            model_path: model_path.to_string(),
+            config_path: config_path.to_string(),
+        };
+        if let Ok(content) = serde_json::to_string_pretty(&cfg) {
+            let _ = std::fs::write(p, content);
+        }
+    }
+}
+
 #[tauri::command]
 async fn init_analyzer(app_handle: tauri::AppHandle, app_state: tauri::State<'_, AppState>) -> Result<String, String> {
     try_init_ort_dylib();
-    let (config_path, model_path) = find_model_files(&app_handle)
-        .ok_or_else(|| "找不到 models/fcpe.onnx 或 fcpe_config.json".to_string())?;
+
+    // 1. Try loading from stored config first
+    let mut resolved_paths = None;
+    if let Some(cfg) = load_stored_config(&app_handle) {
+        let cfg_path = PathBuf::from(&cfg.config_path);
+        let mdl_path = PathBuf::from(&cfg.model_path);
+        if cfg_path.exists() && mdl_path.exists() {
+            eprintln!("Successfully loaded model from app configuration: {}", cfg.model_path);
+            resolved_paths = Some((cfg_path, mdl_path));
+        }
+    }
+
+    // 2. Fallback to auto-detecting
+    let (config_path, model_path) = if let Some(paths) = resolved_paths {
+        paths
+    } else {
+        find_model_files(&app_handle)
+            .ok_or_else(|| "找不到 models/fcpe.onnx 或 fcpe_config.json".to_string())?
+    };
+
     let content = std::fs::read_to_string(&config_path).map_err(|e| format!("读取 config 失败: {}", e))?;
     let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| format!("解析 config 失败: {}", e))?;
     let cent_table: Vec<f32> = json["cent_table"]
@@ -150,6 +203,40 @@ async fn init_analyzer(app_handle: tauri::AppHandle, app_state: tauri::State<'_,
         Err(e) => eprintln!("Warning: 播放器初始化失败: {}", e),
     }
     Ok(format!("已加载模型: {}", model_path.display()))
+}
+
+#[tauri::command]
+async fn init_analyzer_with_paths(
+    app_handle: tauri::AppHandle,
+    app_state: tauri::State<'_, AppState>,
+    config_path: String,
+    model_path: String,
+) -> Result<String, String> {
+    try_init_ort_dylib();
+    let cfg_path = PathBuf::from(&config_path);
+    let mdl_path = PathBuf::from(&model_path);
+    if !cfg_path.exists() || !mdl_path.exists() {
+        return Err("所选的配置文件或模型文件不存在".to_string());
+    }
+
+    let content = std::fs::read_to_string(&cfg_path).map_err(|e| format!("读取 config 失败: {}", e))?;
+    let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| format!("解析 config 失败: {}", e))?;
+    let cent_table: Vec<f32> = json["cent_table"]
+        .as_array().ok_or_else(|| "config 缺少 cent_table".to_string())?
+        .iter().filter_map(|v| v.as_f64().map(|x| x as f32)).collect();
+    let analyzer = PitchAnalyzer::new(&mdl_path.to_string_lossy(), cent_table)
+        .map_err(|e| format!("初始化 analyzer 失败: {}", e))?;
+    
+    *app_state.analyzer.lock().unwrap() = Some(analyzer);
+    
+    // 初始化播放器
+    match AudioPlayer::new() {
+        Ok(player) => *app_state.player.lock().unwrap() = Some(player),
+        Err(e) => eprintln!("Warning: 播放器初始化失败: {}", e),
+    }
+
+    save_stored_config(&app_handle, &config_path, &model_path);
+    Ok(format!("已成功加载自定义模型: {}", mdl_path.display()))
 }
 
 #[tauri::command]
@@ -330,6 +417,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             init_analyzer,
+            init_analyzer_with_paths,
             analyze_audio,
             load_lyrics_lrc,
             load_lyrics_txt,

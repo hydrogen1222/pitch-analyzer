@@ -45,5 +45,5 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "Pitch Analyzer ${{ github.ref_name }}"
           releaseBody: "See assets below."
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
