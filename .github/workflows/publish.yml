@@ -37,6 +37,34 @@ jobs:
       - name: install frontend dependencies
         run: pnpm install
 
+      - name: download onnxruntime (ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          mkdir -p src-tauri/resources
+          curl -L -o ort.tgz https://github.com/microsoft/onnxruntime/releases/download/v1.19.0/onnxruntime-linux-x64-1.19.0.tgz
+          tar -xzf ort.tgz onnxruntime-linux-x64-1.19.0/lib/libonnxruntime.so.1.19.0
+          mv onnxruntime-linux-x64-1.19.0/lib/libonnxruntime.so.1.19.0 src-tauri/resources/libonnxruntime.so
+          rm -rf onnxruntime-linux-x64-1.19.0 ort.tgz
+
+      - name: download onnxruntime (macos only)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          mkdir -p src-tauri/resources
+          curl -L -o ort.tgz https://github.com/microsoft/onnxruntime/releases/download/v1.19.0/onnxruntime-osx-universal-1.19.0.tgz
+          tar -xzf ort.tgz onnxruntime-osx-universal-1.19.0/lib/libonnxruntime.1.19.0.dylib
+          mv onnxruntime-osx-universal-1.19.0/lib/libonnxruntime.1.19.0.dylib src-tauri/resources/libonnxruntime.dylib
+          rm -rf onnxruntime-osx-universal-1.19.0 ort.tgz
+
+      - name: download onnxruntime (windows only)
+        if: matrix.platform == 'windows-latest'
+        run: |
+          mkdir src-tauri/resources -Force
+          Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v1.19.0/onnxruntime-win-x64-1.19.0.zip" -OutFile "ort.zip"
+          Expand-Archive -Path "ort.zip" -DestinationPath "ort_extracted"
+          Move-Item -Path "ort_extracted/onnxruntime-win-x64-1.19.0/lib/onnxruntime.dll" -Destination "src-tauri/resources/onnxruntime.dll"
+          Remove-Item -Recurse -Force "ort.zip", "ort_extracted"
+        shell: pwsh
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

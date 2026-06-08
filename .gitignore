@@ -66,3 +66,8 @@ Desktop.ini
 
 # Local documentation
 RELEASE_GUIDE.md
+
+# Bundled resource libraries
+src-tauri/resources/*.so
+src-tauri/resources/*.dll
+src-tauri/resources/*.dylib

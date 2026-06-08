@@ -125,6 +125,29 @@ pub fn try_init_ort_dylib() {
     eprintln!("Warning: 未找到 libonnxruntime, 请设置 ORT_DYLIB_PATH");
 }
 
+pub fn init_bundled_ort_dylib(app_handle: &tauri::AppHandle) {
+    if std::env::var("ORT_DYLIB_PATH").is_ok() {
+        return;
+    }
+
+    #[cfg(target_os = "windows")]
+    let lib_name = "onnxruntime.dll";
+    #[cfg(target_os = "linux")]
+    let lib_name = "libonnxruntime.so";
+    #[cfg(target_os = "macos")]
+    let lib_name = "libonnxruntime.dylib";
+
+    if let Ok(resource_path) = app_handle.path().resolve(format!("resources/{}", lib_name), tauri::path::BaseDirectory::Resource) {
+        if resource_path.exists() {
+            std::env::set_var("ORT_DYLIB_PATH", &resource_path);
+            eprintln!("Loaded bundled ORT dylib from resource: {}", resource_path.display());
+            return;
+        }
+    }
+
+    try_init_ort_dylib();
+}
+
 #[derive(Clone, serde::Serialize)]
 struct ProgressPayload {
     progress: f32,
@@ -168,7 +191,7 @@ fn save_stored_config(app_handle: &tauri::AppHandle, config_path: &str, model_pa
 
 #[tauri::command]
 async fn init_analyzer(app_handle: tauri::AppHandle, app_state: tauri::State<'_, AppState>) -> Result<String, String> {
-    try_init_ort_dylib();
+    init_bundled_ort_dylib(&app_handle);
 
     // 1. Try loading from stored config first
     let mut resolved_paths = None;
@@ -212,7 +235,7 @@ async fn init_analyzer_with_paths(
     config_path: String,
     model_path: String,
 ) -> Result<String, String> {
-    try_init_ort_dylib();
+    init_bundled_ort_dylib(&app_handle);
     let cfg_path = PathBuf::from(&config_path);
     let mdl_path = PathBuf::from(&model_path);
     if !cfg_path.exists() || !mdl_path.exists() {
