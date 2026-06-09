@@ -37,6 +37,7 @@ fn find_model_files(app_handle: &tauri::AppHandle) -> Option<(PathBuf, PathBuf)>
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(res) = app_handle.path().resource_dir() {
         candidates.push(res.join("models"));
+        candidates.push(res.clone());
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
