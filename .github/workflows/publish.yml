@@ -85,3 +85,23 @@ jobs:
           releaseBody: "See assets below."
           releaseDraft: false
           prerelease: false
+
+      - name: Create and Upload Linux Portable tar.gz
+        if: matrix.platform == 'ubuntu-22.04'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DEB_FILE=$(find src-tauri/target/release/bundle/deb -name "*.deb" | head -n 1)
+          if [ -n "$DEB_FILE" ]; then
+            mkdir -p portable_extract && cd portable_extract
+            ar x "../$DEB_FILE"
+            if [ -f data.tar.xz ]; then
+              tar xf data.tar.xz
+            elif [ -f data.tar.gz ]; then
+              tar xf data.tar.gz
+            fi
+            tar -czvf ../pitch-analyzer-linux-portable.tar.gz usr/
+            cd ..
+            gh release upload ${{ github.ref_name }} pitch-analyzer-linux-portable.tar.gz --clobber
+          fi
+        shell: bash
