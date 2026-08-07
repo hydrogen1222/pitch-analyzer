@@ -14,10 +14,34 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 pub const TARGET_SR: u32 = 16_000;
+/// FCPE hop: 每帧 160 样本 @16kHz → 10ms
+pub const FCPE_HOP: usize = 160;
 
 pub struct DecodedAudio {
     pub samples: Vec<f32>,
     pub sample_rate: u32,
+}
+
+/// 计算逐帧(10ms) RMS 包络，长度 = n_frames，与 FCPE 的 times 对齐。
+/// 供歌词字级对齐 (energy/onset) 使用。
+pub fn compute_rms_envelope(samples: &[f32], n_frames: usize) -> Vec<f32> {
+    let mut rms = Vec::with_capacity(n_frames);
+    for f in 0..n_frames {
+        let start = f * FCPE_HOP;
+        if start >= samples.len() {
+            rms.push(0.0);
+            continue;
+        }
+        let end = (start + FCPE_HOP).min(samples.len());
+        let mut sum = 0.0f32;
+        let mut cnt = 0usize;
+        for &s in &samples[start..end] {
+            sum += s * s;
+            cnt += 1;
+        }
+        rms.push(if cnt > 0 { (sum / cnt as f32).sqrt() } else { 0.0 });
+    }
+    rms
 }
 
 /// 解码任意音频文件，混音到单声道并重采样到 16 kHz。

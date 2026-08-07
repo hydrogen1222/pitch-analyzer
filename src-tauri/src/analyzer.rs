@@ -1,10 +1,11 @@
 // 整合 audio + mel + ONNX + decoder + dsp 的完整 FCPE 分析流水线
 
-use crate::audio::load_audio_16k_mono;
+use crate::audio::{compute_rms_envelope, load_audio_16k_mono};
 use crate::decoder::FCPEDecoder;
 use crate::dsp::post_process;
 use crate::mel::{MelConfig, MelExtractor};
 use crate::models::{AnalyzerConfig, PitchTrack};
+use crate::note_tracker;
 use ndarray::Array3;
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
@@ -91,15 +92,28 @@ impl PitchAnalyzer {
             .min(frequencies.len())
             .min(conf.len())
             .min(midis.len());
+        let times = times[..min_len].to_vec();
+        let frequencies = frequencies[..min_len].to_vec();
+        let midis = midis[..min_len].to_vec();
+        let confidences = conf[..min_len].to_vec();
+
+        // 7. 逐帧 RMS 包络 (供歌词字级对齐)
+        let rms = compute_rms_envelope(&audio.samples, times.len());
+
+        // 8. Clean Pitch → NoteEvent (Annotation Note Track)
+        let note_events =
+            note_tracker::build_note_events(&times, &midis, &confidences, &config.note_tracking);
 
         let _ = n_mels; // 防止 unused warning
         progress_cb(1.0, "分析完成");
 
         Ok(PitchTrack {
-            times: times[..min_len].to_vec(),
-            frequencies: frequencies[..min_len].to_vec(),
-            midis: midis[..min_len].to_vec(),
-            confidences: conf[..min_len].to_vec(),
+            times,
+            frequencies,
+            midis,
+            confidences,
+            rms,
+            note_events,
         })
     }
 }

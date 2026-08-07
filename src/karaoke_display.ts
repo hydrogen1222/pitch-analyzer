@@ -1,5 +1,5 @@
 
-import { LyricLine } from "./models_lyrics";
+import { LyricLine, PitchNote } from "./models_lyrics";
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
@@ -122,7 +122,9 @@ export class KaraokeDisplay {
       noteBox.style.justifyContent = "center";
       noteBox.style.alignItems = "center";
 
-      if (token.pitch_notes.length > 0) {
+      // 字幕默认显示 primary_note (duration × confidence 评分最高者)
+      const primary = token.primary_note ?? this.bestNote(token);
+      if (primary) {
         const noteEl = document.createElement("span");
         noteEl.style.padding = "4px 10px";
         noteEl.style.borderRadius = "6px";
@@ -137,7 +139,7 @@ export class KaraokeDisplay {
         }
         noteEl.style.fontWeight = "700";
         noteEl.style.fontSize = `${Math.max(10, Math.floor(this.lyricFontSize * 0.55))}px`;
-        const midiRounded = Math.round(token.pitch_notes[0].median_midi);
+        const midiRounded = Math.round(primary.median_midi);
         const oct = Math.floor(midiRounded / 12) - 1;
         const noteName = NOTE_NAMES[midiRounded % 12];
         noteEl.textContent = `${noteName}${oct}`;
@@ -190,6 +192,20 @@ export class KaraokeDisplay {
 
     this.displayEl.appendChild(wrap);
     this.displayEl.appendChild(bottomRightInfo);
+  }
+
+  // 与后端 select_primary_note 一致的评分回退: duration × confidence
+  private bestNote(token: { pitch_notes: PitchNote[] }): PitchNote | null {
+    let best = null;
+    let bestScore = -Infinity;
+    for (const n of token.pitch_notes) {
+      const score = (n.end_time - n.start_time) * n.confidence_mean;
+      if (score > bestScore) {
+        bestScore = score;
+        best = n;
+      }
+    }
+    return best;
   }
 
   private findCurrentLineAndToken(): [LyricLine, number] | null {

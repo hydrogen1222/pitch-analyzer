@@ -4,6 +4,16 @@ export interface PitchTrack {
   frequencies: number[];
   confidences: number[];
   midis: number[];
+  rms?: number[];
+  note_events?: NoteEvent[];
+}
+
+export interface NoteEvent {
+  start: number;
+  end: number;
+  midi: number;
+  note_name: string;
+  confidence: number;
 }
 
 export interface AnalysisParams {
@@ -13,6 +23,7 @@ export interface AnalysisParams {
   smoothing: number;
   median_smoothing: number;
   quantize: boolean;
+  min_note_duration_ms: number;
 }
 
 export interface Preset {
@@ -32,6 +43,7 @@ export const PRESETS: Record<string, Preset> = {
       smoothing: 15,
       median_smoothing: 11,
       quantize: false,
+      min_note_duration_ms: 45,
     },
   },
   folk: {
@@ -44,6 +56,7 @@ export const PRESETS: Record<string, Preset> = {
       smoothing: 17,
       median_smoothing: 13,
       quantize: false,
+      min_note_duration_ms: 50,
     },
   },
   classical: {
@@ -56,6 +69,7 @@ export const PRESETS: Record<string, Preset> = {
       smoothing: 21,
       median_smoothing: 15,
       quantize: true,
+      min_note_duration_ms: 50,
     },
   },
 };

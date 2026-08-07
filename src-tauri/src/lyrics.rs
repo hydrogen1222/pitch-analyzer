@@ -1,8 +1,8 @@
-// 歌词解析: LRC + TXT, tokenizer, aligner, SRT 导出
+// 歌词解析: LRC + TXT, tokenizer, 字级对齐, NoteEvent 绑定, primary note 选择
 
-use crate::models::{LyricLine, LyricToken, PitchNote, PitchTrack};
+use crate::models::{LyricLine, LyricToken, NoteEvent, NoteTrackingParams, PitchNote, PitchTrack};
 use regex::Regex;
-use std::path::Path;
+use std::cmp::Ordering;
 
 // ── Tokenizer ──────────────────────────────────────────────
 
@@ -54,6 +54,7 @@ pub fn parse_txt(text: &str) -> Vec<LyricLine> {
                 start_time: None,
                 end_time: None,
                 pitch_notes: Vec::new(),
+                primary_note: None,
             })
             .collect();
         lines.push(LyricLine {
@@ -150,6 +151,7 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
                 start_time: None,
                 end_time: None,
                 pitch_notes: Vec::new(),
+                primary_note: None,
             })
             .collect();
 
@@ -171,12 +173,27 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
     lines
 }
 
-// ── Aligner ────────────────────────────────────────────────
+// ── Token 时间分配 / 对齐 ──────────────────────────────────
 
-const MIN_NOTE_FRAMES: usize = 5;
-const DOMINANT_NOTE_RATIO: f32 = 0.65;
+/// 字级对齐参数
+#[derive(Debug, Clone, Copy)]
+pub struct TokenAlignParams {
+    /// 最小字时长，防止出现极端短字
+    pub min_token_duration_ms: f32,
+    /// 对齐窗口在 voiced 区域外扩的 margin
+    pub voiced_margin_ms: f32,
+}
 
-/// 均匀分配 token 时间
+impl Default for TokenAlignParams {
+    fn default() -> Self {
+        Self {
+            min_token_duration_ms: 60.0,
+            voiced_margin_ms: 80.0,
+        }
+    }
+}
+
+/// 均匀分配 token 时间 (作为 fallback，不再是主要算法)
 pub fn distribute_token_times(lines: &mut [LyricLine]) {
     for line in lines.iter_mut() {
         let start = match line.start_time {
@@ -187,58 +204,358 @@ pub fn distribute_token_times(lines: &mut [LyricLine]) {
             Some(t) => t,
             None => continue,
         };
+        distribute_line_times(line, start, end);
+    }
+}
+
+fn distribute_line_times(line: &mut LyricLine, start: f32, end: f32) {
+    if line.tokens.is_empty() {
+        return;
+    }
+    let duration = (end - start).max(0.1);
+    let token_dur = duration / line.tokens.len() as f32;
+    let mut current = start;
+    for token in &mut line.tokens {
+        token.start_time = Some(current);
+        token.end_time = Some(current + token_dur);
+        current += token_dur;
+    }
+}
+
+/// 在句级约束内，根据人声音频特征自动分配字级时间。
+///
+/// 特征: voiced/unvoiced、F0 变化、RMS 能量包络；字符数量作为最终约束；
+/// 通过 DP 代价函数选择 N-1 个最佳切分点。无音频特征时回退到均匀分配。
+pub fn align_token_times(lines: &mut [LyricLine], track: &PitchTrack, params: &TokenAlignParams) {
+    for line in lines.iter_mut() {
+        let (start, end) = match (line.start_time, line.end_time) {
+            (Some(s), Some(e)) if e > s => (s, e),
+            _ => continue,
+        };
         if line.tokens.is_empty() {
             continue;
         }
-        let duration = (end - start).max(0.1);
-        let token_dur = duration / line.tokens.len() as f32;
-        let mut current = start;
-        for token in &mut line.tokens {
-            token.start_time = Some(current);
-            token.end_time = Some(current + token_dur);
-            current += token_dur;
+        // 已有逐字时间 (如 enhanced LRC) → 不重新估计
+        if line.tokens.iter().all(|t| t.start_time.is_some() && t.end_time.is_some()) {
+            continue;
+        }
+        if !dp_align_line(line, track, start, end, params) {
+            distribute_line_times(line, start, end);
         }
     }
 }
 
-/// 绑定 pitch 到每个 token
+/// 基于特征 DP 的句内字级对齐。返回是否成功；失败由调用方回退均匀分配。
+fn dp_align_line(
+    line: &mut LyricLine,
+    track: &PitchTrack,
+    line_start: f32,
+    line_end: f32,
+    params: &TokenAlignParams,
+) -> bool {
+    let n_tokens = line.tokens.len();
+    if n_tokens < 2 || track.times.is_empty() {
+        return false;
+    }
+
+    // 收集 line 范围内帧索引
+    let mut fidx: Vec<usize> = Vec::new();
+    for i in 0..track.times.len() {
+        let t = track.times[i];
+        if t >= line_start && t < line_end {
+            fidx.push(i);
+        }
+    }
+    if fidx.len() < 2 {
+        return false;
+    }
+
+    // 对齐窗口限定到 voiced 发声区域 (首尾留 margin)
+    let margin = params.voiced_margin_ms / 1000.0;
+    let mut v_first: Option<usize> = None;
+    let mut v_last: usize = fidx[0];
+    for &fi in &fidx {
+        if !track.midis[fi].is_nan() {
+            if v_first.is_none() {
+                v_first = Some(fi);
+            }
+            v_last = fi;
+        }
+    }
+    let align_start = match v_first {
+        Some(fi) => line_start.max(track.times[fi] - margin),
+        None => line_start,
+    };
+    let align_end = match v_first {
+        Some(_) => line_end.min(track.times[v_last] + margin),
+        None => line_end,
+    };
+    if align_end <= align_start {
+        return false;
+    }
+
+    // 重新只取窗口内帧
+    let fidx: Vec<usize> = fidx
+        .into_iter()
+        .filter(|&i| track.times[i] >= align_start && track.times[i] < align_end)
+        .collect();
+    if fidx.len() < 2 {
+        return false;
+    }
+
+    let total_dur = align_end - align_start;
+    let ideal = total_dur / n_tokens as f32;
+    let min_dur = (params.min_token_duration_ms / 1000.0).min(ideal);
+
+    // 边界得分: 无音间隙 / F0 变化 / RMS 能量谷 → 好的音节边界
+    let boundary_score = |fi: usize| -> f32 {
+        let mut s = 0.0f32;
+        if track.midis[fi].is_nan() {
+            s += 2.0; // 落在无声间隙
+        } else if fi > 0 && track.midis[fi - 1].is_nan() {
+            s += 1.0; // 起音处
+        }
+        if fi > 0 {
+            let m0 = track.midis[fi - 1];
+            let m1 = track.midis[fi];
+            if !m0.is_nan() && !m1.is_nan() && m0.round() as i32 != m1.round() as i32 {
+                s += 1.5; // F0 换音
+            }
+        }
+        if fi > 0 && track.rms.len() > fi {
+            let r0 = track.rms[fi - 1];
+            let r1 = track.rms[fi];
+            if r1 < r0 * 0.6 {
+                s += 1.0; // 能量谷
+            }
+        }
+        s
+    };
+
+    let time_at = |j: usize| track.times[fidx[j]];
+    let inf = f32::INFINITY;
+    let m = fidx.len();
+    let last_k = n_tokens - 2; // 需要内部边界的最大 token 下标 (0..=n-2 有内部边界)
+
+    let mut dp = vec![vec![inf; m]; n_tokens];
+    let mut parent = vec![vec![usize::MAX; m]; n_tokens];
+
+    let seg_cost = |prev_t: f32, cur_t: f32, score: f32| -> f32 {
+        let dur = cur_t - prev_t;
+        if dur < min_dur {
+            return inf;
+        }
+        let dur_cost = (dur - ideal).abs() / ideal.max(1e-3);
+        let bnd_cost = -score * 0.8;
+        dur_cost + bnd_cost
+    };
+
+    // 第一个 token 从 align_start 开始
+    for j in 0..m {
+        let t1 = time_at(j);
+        if t1 <= align_start {
+            continue;
+        }
+        dp[0][j] = seg_cost(align_start, t1, boundary_score(fidx[j]));
+    }
+
+    // 中间 token
+    for k in 1..=last_k {
+        for j in k..m {
+            let t_j = time_at(j);
+            let mut best = inf;
+            let mut bp = usize::MAX;
+            for p in (k - 1)..j {
+                if dp[k - 1][p] == inf {
+                    continue;
+                }
+                let t_p = time_at(p);
+                let c = dp[k - 1][p] + seg_cost(t_p, t_j, boundary_score(fidx[j]));
+                if c < best {
+                    best = c;
+                    bp = p;
+                }
+            }
+            dp[k][j] = best;
+            parent[k][j] = bp;
+        }
+    }
+
+    // 最后一个 token 结束于 align_end
+    let mut best_cost = inf;
+    let mut best_j = usize::MAX;
+    for j in last_k..m {
+        if dp[last_k][j] == inf {
+            continue;
+        }
+        let t_j = time_at(j);
+        let c = dp[last_k][j] + seg_cost(t_j, align_end, 0.0);
+        if c < best_cost {
+            best_cost = c;
+            best_j = j;
+        }
+    }
+    if best_j == usize::MAX {
+        return false;
+    }
+
+    // 回溯边界
+    let mut b_after = vec![usize::MAX; n_tokens];
+    let mut cur = best_j;
+    for k in (0..=last_k).rev() {
+        b_after[k] = cur;
+        cur = parent[k][cur];
+    }
+
+    let mut prev_time = align_start;
+    for k in 0..n_tokens {
+        let t_end = if k == n_tokens - 1 {
+            align_end
+        } else {
+            time_at(b_after[k])
+        };
+        line.tokens[k].start_time = Some(prev_time);
+        line.tokens[k].end_time = Some(t_end);
+        prev_time = t_end;
+    }
+    true
+}
+
+// ── Token ↔ pitch 绑定 ────────────────────────────────────
+
+const MIN_NOTE_FRAMES: usize = 5;
+const DOMINANT_NOTE_RATIO: f32 = 0.65;
+
+/// 绑定 pitch 到每个 token，并选择 primary_note。
+///
+/// 优先使用 NoteEvent (Annotation Track)；无 NoteEvent 时回退到帧级分段。
+/// 绑定时忽略 token 首尾 edge_ignore margin，使用中心稳定区域。
 pub fn bind_pitch_to_tokens(
     lines: &mut [LyricLine],
     pitch_track: &PitchTrack,
     confidence_threshold: f32,
+    note_tracking: &NoteTrackingParams,
 ) {
     if pitch_track.times.is_empty() {
         return;
     }
+    let edge_ignore = note_tracking.edge_ignore_ms / 1000.0;
+    let min_dur = note_tracking.min_note_duration_ms / 1000.0;
+
     for line in lines.iter_mut() {
         for token in &mut line.tokens {
             let (t_start, t_end) = match (token.start_time, token.end_time) {
                 (Some(s), Some(e)) => (s, e),
                 _ => continue,
             };
-            // 收集落在 [t_start, t_end) 内的帧
-            let mut seg_times = Vec::new();
-            let mut seg_midis = Vec::new();
-            let mut seg_conf = Vec::new();
-            for i in 0..pitch_track.times.len() {
-                let t = pitch_track.times[i];
-                if t < t_start {
-                    continue;
-                }
-                if t >= t_end {
-                    break;
-                }
-                let m = pitch_track.midis[i];
-                let c = pitch_track.confidences[i];
-                if c >= confidence_threshold && m.is_finite() && !m.is_nan() {
-                    seg_times.push(t);
-                    seg_midis.push(m);
-                    seg_conf.push(c);
-                }
+            // 中心稳定区域
+            let c_start = t_start + edge_ignore;
+            let c_end = t_end - edge_ignore;
+            let (c_start, c_end) = if c_end > c_start {
+                (c_start, c_end)
+            } else {
+                (t_start, t_end)
+            };
+
+            if !pitch_track.note_events.is_empty() {
+                token.pitch_notes =
+                    note_events_in_range(&pitch_track.note_events, c_start, c_end, note_tracking);
+            } else {
+                token.pitch_notes =
+                    frame_segment_notes(pitch_track, c_start, c_end, confidence_threshold);
             }
-            token.pitch_notes = segment_pitch_notes(&seg_times, &seg_midis, &seg_conf, t_start, t_end);
+            token.primary_note =
+                select_primary_note(&token.pitch_notes, min_dur, confidence_threshold);
         }
     }
+}
+
+/// 取与 token 中心区域有足够重叠的 NoteEvent (起始时间裁剪到 token 内)
+fn note_events_in_range(
+    events: &[NoteEvent],
+    start: f32,
+    end: f32,
+    params: &NoteTrackingParams,
+) -> Vec<PitchNote> {
+    let min_overlap = (params.edge_ignore_ms / 1000.0).max(0.0);
+    events
+        .iter()
+        .filter_map(|ev| {
+            let ov_start = ev.start.max(start);
+            let ov_end = ev.end.min(end);
+            let overlap = ov_end - ov_start;
+            if overlap >= min_overlap && overlap > 0.0 {
+                Some(note_event_to_pitch_note(ev, ov_start, ov_end))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn note_event_to_pitch_note(ev: &NoteEvent, start: f32, end: f32) -> PitchNote {
+    let dur = (end - start).max(0.0);
+    PitchNote {
+        start_time: start,
+        end_time: end,
+        median_midi: ev.midi as f32,
+        mean_midi: ev.midi as f32,
+        rounded_midi: ev.midi,
+        confidence_mean: ev.confidence,
+        point_count: (dur / 0.01).round().max(1.0) as usize,
+    }
+}
+
+/// 帧级分段 (无 NoteEvent 时的回退路径)
+fn frame_segment_notes(
+    pitch_track: &PitchTrack,
+    c_start: f32,
+    c_end: f32,
+    confidence_threshold: f32,
+) -> Vec<PitchNote> {
+    let mut seg_times = Vec::new();
+    let mut seg_midis = Vec::new();
+    let mut seg_conf = Vec::new();
+    for i in 0..pitch_track.times.len() {
+        let t = pitch_track.times[i];
+        if t < c_start {
+            continue;
+        }
+        if t >= c_end {
+            break;
+        }
+        let m = pitch_track.midis[i];
+        let c = pitch_track.confidences[i];
+        if c >= confidence_threshold && m.is_finite() && !m.is_nan() {
+            seg_times.push(t);
+            seg_midis.push(m);
+            seg_conf.push(c);
+        }
+    }
+    segment_pitch_notes(&seg_times, &seg_midis, &seg_conf, c_start, c_end)
+}
+
+/// 从 NoteEvent / 帧分段结果中选择主音:
+/// score = voiced_duration × mean_confidence，剔除非常短、低 confidence 的候选。
+pub fn select_primary_note(
+    notes: &[PitchNote],
+    min_duration: f32,
+    min_confidence: f32,
+) -> Option<PitchNote> {
+    let filtered = notes
+        .iter()
+        .filter(|n| (n.end_time - n.start_time) >= min_duration && n.confidence_mean >= min_confidence)
+        .max_by(|a, b| score_cmp(a, b));
+    match filtered {
+        Some(n) => Some(n.clone()),
+        None => notes.iter().max_by(|a, b| score_cmp(a, b)).cloned(),
+    }
+}
+
+fn score_cmp(a: &PitchNote, b: &PitchNote) -> Ordering {
+    let sa = (a.end_time - a.start_time) * a.confidence_mean;
+    let sb = (b.end_time - b.start_time) * b.confidence_mean;
+    sa.partial_cmp(&sb).unwrap_or(Ordering::Equal)
 }
 
 fn segment_pitch_notes(
@@ -449,81 +766,4 @@ fn mean(values: &[f32]) -> f32 {
         return 0.0;
     }
     values.iter().sum::<f32>() / values.len() as f32
-}
-
-// ── SRT Export ─────────────────────────────────────────────
-
-pub fn export_srt(
-    pitch_track: &PitchTrack,
-    lyrics: &[LyricLine],
-    path: &Path,
-) -> Result<(), String> {
-    let note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-
-    let midi_to_note = |midi: f32| -> String {
-        if midi.is_nan() {
-            return "---".to_string();
-        }
-        let m = midi.round() as i32;
-        format!("{}{}", note_names[(((m % 12) + 12) % 12) as usize], m / 12 - 1)
-    };
-
-    let to_srt_time = |sec: f32| -> String {
-        let hrs = (sec / 3600.0) as u32;
-        let mins = ((sec % 3600.0) / 60.0) as u32;
-        let secs = (sec % 60.0) as u32;
-        let ms = ((sec % 1.0) * 1000.0) as u32;
-        format!("{:02}:{:02}:{:02},{:03}", hrs, mins, secs, ms)
-    };
-
-    let mut f = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    use std::io::Write;
-    let mut idx = 1u32;
-
-    if !lyrics.is_empty() {
-        for line in lyrics {
-            for token in &line.tokens {
-                let (t_start, t_end) = match (token.start_time, token.end_time) {
-                    (Some(s), Some(e)) => (s, e),
-                    _ => continue,
-                };
-                let text = if token.text.contains('|') {
-                    token.text.split('|').next().unwrap_or(&token.text)
-                } else {
-                    &token.text
-                };
-                let note_display = if let Some(note) = token.pitch_notes.first() {
-                    format!(" [{}]", midi_to_note(note.median_midi))
-                } else {
-                    String::new()
-                };
-                writeln!(f, "{}", idx).map_err(|e| e.to_string())?;
-                writeln!(f, "{} --> {}", to_srt_time(t_start), to_srt_time(t_end))
-                    .map_err(|e| e.to_string())?;
-                writeln!(f, "{}{}\n", text, note_display).map_err(|e| e.to_string())?;
-                idx += 1;
-            }
-        }
-    } else {
-        let interval = 0.5f32;
-        let mut t = 0.0f32;
-        while t < pitch_track.times[pitch_track.times.len() - 1] {
-            let i = match pitch_track.times.binary_search_by(|probe| probe.partial_cmp(&t).unwrap()) {
-                Ok(i) => i,
-                Err(i) => i.min(pitch_track.midis.len() - 1),
-            };
-            let midi = pitch_track.midis[i];
-            let mut display = midi_to_note(midi);
-            if !midi.is_nan() {
-                display.push_str(&format!(" ({:.2})", midi));
-            }
-            writeln!(f, "{}", idx).map_err(|e| e.to_string())?;
-            writeln!(f, "{} --> {}", to_srt_time(t), to_srt_time(t + interval))
-                .map_err(|e| e.to_string())?;
-            writeln!(f, "{}\n", display).map_err(|e| e.to_string())?;
-            idx += 1;
-            t += interval;
-        }
-    }
-    Ok(())
 }

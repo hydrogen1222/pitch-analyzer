@@ -17,18 +17,26 @@ struct TestData {
     latent: Vec<Vec<Vec<f32>>>,   // (1, T, 360)
 }
 
-fn load_test_data() -> TestData {
+/// test_data.json 被 gitignore (需自行用 Python 参考实现生成)。
+/// 缺失时返回 None，相关测试跳过，避免克隆仓库后测试失败。
+fn load_test_data() -> Option<TestData> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .join("models/test_data.json");
-    let content = std::fs::read_to_string(&path).unwrap();
-    serde_json::from_str(&content).unwrap()
+    let content = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&content).ok()
 }
 
 #[test]
 fn test_mel_matches_python() {
-    let td = load_test_data();
+    let td = match load_test_data() {
+        Some(td) => td,
+        None => {
+            eprintln!("Skipping mel test: models/test_data.json not found");
+            return;
+        }
+    };
     let wav = &td.wav;
     let ref_mel = &td.mel[0]; // (T, 128)
 
@@ -63,7 +71,13 @@ fn test_mel_matches_python() {
 #[test]
 fn test_onnx_inference_matches_python() {
     pitch_analyzer_tauri_lib::try_init_ort_dylib();
-    let td = load_test_data();
+    let td = match load_test_data() {
+        Some(td) => td,
+        None => {
+            eprintln!("Skipping ONNX test: models/test_data.json not found");
+            return;
+        }
+    };
     let ref_mel = &td.mel[0]; // (T, 128)
     let ref_latent = &td.latent[0]; // (T, 360)
     let t = ref_mel.len();
@@ -119,7 +133,13 @@ fn test_onnx_inference_matches_python() {
 
 #[test]
 fn test_decoder_produces_f0() {
-    let td = load_test_data();
+    let td = match load_test_data() {
+        Some(td) => td,
+        None => {
+            eprintln!("Skipping decoder test: models/test_data.json not found");
+            return;
+        }
+    };
     let ref_latent = &td.latent[0]; // (T, 360)
 
     // 从 config 加载 cent_table
@@ -145,7 +165,7 @@ fn test_decoder_produces_f0() {
         }
     }
 
-    let (f0, conf) = decoder.decode(latent_arr.view(), 0.05);
+    let (f0, _conf) = decoder.decode(latent_arr.view(), 0.05);
     let voiced: Vec<(usize, f32)> = f0
         .iter()
         .enumerate()

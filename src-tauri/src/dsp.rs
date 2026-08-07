@@ -98,7 +98,7 @@ fn stabilize_vocal_midi(midi: &[f32], conf: &[f32], threshold: f32) -> Vec<f32> 
             out[i] = f32::NAN;
         }
     }
-    out = remove_short_pitch_islands(&out, 1.25, 5);
+    out = remove_short_pitch_islands(&out, conf, 1.25, 5);
     out = apply_hampel_midi(&out, 13, 0.9);
     out
 }
@@ -121,7 +121,12 @@ fn iter_voiced_segments(midi: &[f32]) -> Vec<(usize, usize)> {
     segs
 }
 
-fn remove_short_pitch_islands(midi: &[f32], jump_threshold: f32, min_frames: usize) -> Vec<f32> {
+fn remove_short_pitch_islands(
+    midi: &[f32],
+    conf: &[f32],
+    jump_threshold: f32,
+    min_frames: usize,
+) -> Vec<f32> {
     let mut out = midi.to_vec();
     for (seg_start, seg_end) in iter_voiced_segments(midi) {
         let seg_len = seg_end - seg_start + 1;
@@ -144,9 +149,40 @@ fn remove_short_pitch_islands(midi: &[f32], jump_threshold: f32, min_frames: usi
             if re - rs + 1 >= min_frames {
                 continue;
             }
+
+            // 首尾 run: "短暂异常 + 相邻稳定主音" 判断。
+            // 不要简单删除首尾保护：只有很短、与主音差距大且置信度低(或恰为八度错误)才修正为相邻稳定音。
             if ri == 0 || ri == runs.len() - 1 {
+                if runs.len() < 2 {
+                    continue;
+                }
+                let (nbr_s, nbr_e) = if ri == 0 {
+                    runs[1]
+                } else {
+                    runs[runs.len() - 2]
+                };
+                let nbr_len = nbr_e - nbr_s + 1;
+                if nbr_len < min_frames {
+                    continue; // 相邻 run 也不是稳定主音
+                }
+                let cur_med = nanmedian(&out[rs..=re]);
+                let nbr_med = nanmedian(&out[nbr_s..=nbr_e]);
+                let diff = (cur_med - nbr_med).abs();
+                if diff <= jump_threshold {
+                    continue; // 差距不大 → 保留 (真实短音/倚音)
+                }
+                let cur_conf = nanmean(&conf[rs..=re.min(conf.len() - 1)]);
+                let nbr_conf = nanmean(&conf[nbr_s..=nbr_e.min(conf.len() - 1)]);
+                let is_octave = (diff - 12.0).abs() <= 1.5;
+                if is_octave || cur_conf < nbr_conf {
+                    for j in rs..=re {
+                        out[j] = nbr_med;
+                    }
+                }
                 continue;
             }
+
+            // 中间 run: 仅在前后主音接近时插值过渡
             let (prev_s, prev_e) = runs[ri - 1];
             let (next_s, next_e) = runs[ri + 1];
             let prev_med = nanmedian(&out[prev_s..=prev_e]);
@@ -242,6 +278,14 @@ fn nanmedian(x: &[f32]) -> f32 {
     } else {
         valid[n / 2]
     }
+}
+
+fn nanmean(x: &[f32]) -> f32 {
+    let valid: Vec<f32> = x.iter().filter(|&&v| !v.is_nan()).copied().collect();
+    if valid.is_empty() {
+        return 0.0;
+    }
+    valid.iter().sum::<f32>() / valid.len() as f32
 }
 
 /// 简单 median filter (只处理有效段内的值，不含 NaN)
@@ -347,4 +391,83 @@ fn savgol_coeffs(window: usize, polyorder: usize) -> Vec<f32> {
         coeffs.push(c as f32);
     }
     coeffs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn midis_from(vals: &[(f32, usize)]) -> Vec<f32> {
+        vals.iter().flat_map(|&(m, len)| vec![m; len]).collect()
+    }
+
+    fn conf_vec(len: usize, v: f32) -> Vec<f32> {
+        vec![v; len]
+    }
+
+    /// 短暂八度错误 (段中): C4 C4 C5(20ms) C4 C4 → C5 被插值为过渡，全部变回 C4
+    #[test]
+    fn test_short_octave_island_mid() {
+        let midis = midis_from(&[(60.0, 10), (72.0, 2), (60.0, 10)]);
+        let conf = conf_vec(midis.len(), 0.8);
+        let out = remove_short_pitch_islands(&midis, &conf, 1.25, 5);
+        let valid: Vec<f32> = out.iter().filter(|m| !m.is_nan()).copied().collect();
+        assert!(valid.iter().all(|&m| (m - 60.0).abs() < 1.0),
+                "mid-run octave island should be smoothed to C4: {:?}", valid);
+    }
+
+    /// 句首八度错误: C5(30ms) → C4(500ms) → 首部短暂 C5 被修正为相邻主音 C4
+    #[test]
+    fn test_sentence_start_octave_fixed() {
+        let midis = midis_from(&[(72.0, 3), (60.0, 50)]);
+        let conf = conf_vec(midis.len(), 0.8);
+        let out = remove_short_pitch_islands(&midis, &conf, 1.25, 5);
+        let head: Vec<f32> = out[0..3].iter().copied().collect();
+        assert!(head.iter().all(|&m| (m - 60.0).abs() < 1.0),
+                "sentence-start C5 must be fixed to C4: {:?}", head);
+    }
+
+    /// 尾音错误: E4(500ms) → E5(20ms) → 尾部 E5 被修正回 E4
+    #[test]
+    fn test_tail_octave_fixed() {
+        let midis = midis_from(&[(64.0, 50), (76.0, 2)]);
+        let conf = conf_vec(midis.len(), 0.8);
+        let out = remove_short_pitch_islands(&midis, &conf, 1.25, 5);
+        let tail: Vec<f32> = out[50..52].iter().copied().collect();
+        assert!(tail.iter().all(|&m| (m - 64.0).abs() < 1.0),
+                "tail E5 must be fixed to E4: {:?}", tail);
+    }
+
+    /// 真实倚音: D4(100ms) → E4(400ms) → 首部足够长，不得被删除
+    #[test]
+    fn test_real_appoggiatura_kept() {
+        let midis = midis_from(&[(62.0, 10), (64.0, 40)]);
+        let conf = conf_vec(midis.len(), 0.8);
+        let out = remove_short_pitch_islands(&midis, &conf, 1.25, 5);
+        assert!((out[0] - 62.0).abs() < 0.5, "appoggiatura D4 must be kept: {}", out[0]);
+        assert!((out[9] - 62.0).abs() < 0.5, "appoggiatura tail must be kept: {}", out[9]);
+        assert!((out[10] - 64.0).abs() < 0.5, "main note E4 must be kept: {}", out[10]);
+    }
+
+    /// 极短噪声: C4 中间 1 帧 G5(10ms) → 前后主音接近 → 插值抹平
+    #[test]
+    fn test_short_noise_interpolated() {
+        let midis = midis_from(&[(60.0, 10), (79.0, 1), (60.0, 10)]);
+        let conf = conf_vec(midis.len(), 0.8);
+        let out = remove_short_pitch_islands(&midis, &conf, 1.25, 5);
+        let valid: Vec<f32> = out.iter().filter(|m| !m.is_nan()).copied().collect();
+        assert!(valid.iter().all(|&m| (m - 60.0).abs() < 1.0),
+                "1-frame noise must be smoothed away: {:?}", valid);
+    }
+
+    /// 短音但置信度高、且非八度 → 保留 (不误删真实短音)
+    #[test]
+    fn test_short_low_diff_kept() {
+        // 首部 2 帧 61 (C#4) 后接 60 (C4): 差距 1 半音 < jump_threshold → 不是异常段
+        let midis = midis_from(&[(61.0, 2), (60.0, 20)]);
+        let conf = conf_vec(midis.len(), 0.8);
+        let out = remove_short_pitch_islands(&midis, &conf, 1.25, 5);
+        // 由于 diff <= jump_threshold，两个 run 其实是同一段，原样保留
+        assert!(!out[0].is_nan());
+    }
 }

@@ -14,6 +14,7 @@ export interface LyricToken {
   start_time: number | null;
   end_time: number | null;
   pitch_notes: PitchNote[];
+  primary_note?: PitchNote | null;
 }
 
 export interface LyricLine {

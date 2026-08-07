@@ -42,6 +42,8 @@ let clearLyricsBtn: HTMLButtonElement | null;
 let saveProjBtn: HTMLButtonElement | null;
 let loadProjBtn: HTMLButtonElement | null;
 let exportSrtBtn: HTMLButtonElement | null;
+let exportAssBtn: HTMLButtonElement | null;
+let minNoteDurInput: HTMLInputElement | null;
 let pitchFontInput: HTMLInputElement | null;
 let lyricFontInput: HTMLInputElement | null;
 let selectModelBtn: HTMLButtonElement | null;
@@ -69,6 +71,7 @@ function applyPreset(name: string) {
   if (quantizeInput) quantizeInput.checked = preset.params.quantize;
   if (medianInput) medianInput.value = String(preset.params.median_smoothing);
   if (smoothingInput) smoothingInput.value = String(preset.params.smoothing);
+  if (minNoteDurInput) minNoteDurInput.value = String(preset.params.min_note_duration_ms);
   if (presetDescEl) presetDescEl.textContent = preset.description;
 }
 
@@ -80,6 +83,7 @@ function getCurrentParams(): AnalysisParams {
     smoothing: parseFloat(smoothingInput?.value || "15"),
     median_smoothing: parseFloat(medianInput?.value || "11"),
     quantize: quantizeInput?.checked || false,
+    min_note_duration_ms: parseFloat(minNoteDurInput?.value || "45"),
   };
 }
 
@@ -95,6 +99,7 @@ function enableControls(hasTrack: boolean) {
   if (progressSlider) progressSlider.disabled = !hasTrack;
   if (saveProjBtn) saveProjBtn.disabled = !hasTrack;
   if (exportSrtBtn) exportSrtBtn.disabled = !hasTrack;
+  if (exportAssBtn) exportAssBtn.disabled = !hasTrack;
 }
 
 function updateTimeDisplay() {
@@ -275,7 +280,7 @@ async function doLoadProject() {
     });
     if (!selected) return;
 
-    const data = await invoke("load_project", { path: selected }) as { audio_path?: string; pitch_track?: PitchTrack; lyrics?: LyricLine[] };
+    const data = await invoke("load_project", { path: selected }) as { audio_path?: string; pitch_track?: PitchTrack; lyrics?: LyricLine[]; analysis_params?: AnalysisParams };
     if (data.pitch_track) {
       state.track = data.pitch_track;
       state.duration = data.pitch_track.times[data.pitch_track.times.length - 1];
@@ -287,6 +292,17 @@ async function doLoadProject() {
       state.lyrics = data.lyrics;
       if (karaokeDisplay) karaokeDisplay.setLyrics(data.lyrics);
       if (clearLyricsBtn) clearLyricsBtn.disabled = false;
+    }
+    // 恢复分析参数到界面，保证后续导出/重新分析与工程一致
+    if (data.analysis_params) {
+      const p = data.analysis_params;
+      if (confidenceInput) confidenceInput.value = String(p.confidence_threshold);
+      if (fminInput) fminInput.value = String(p.fmin);
+      if (fmaxInput) fmaxInput.value = String(p.fmax);
+      if (quantizeInput) quantizeInput.checked = p.quantize;
+      if (medianInput) medianInput.value = String(p.median_smoothing);
+      if (smoothingInput) smoothingInput.value = String(p.smoothing);
+      if (minNoteDurInput) minNoteDurInput.value = String(p.min_note_duration_ms);
     }
     setStatus("项目已加载");
   } catch (e) {
@@ -307,6 +323,22 @@ async function doExportSrt() {
     setStatus("SRT 已导出");
   } catch (e) {
     console.error("Export SRT failed:", e);
+    await message("导出失败: " + e, { title: "错误", kind: "error" });
+  }
+}
+
+async function doExportAss() {
+  try {
+    const selected = await save({
+      filters: [{ name: "ASS", extensions: ["ass"] }],
+      defaultPath: "pitch.ass"
+    });
+    if (!selected) return;
+
+    await invoke("export_ass", { path: selected });
+    setStatus("ASS 已导出 (可直接用 ffmpeg/libass 烧录)");
+  } catch (e) {
+    console.error("Export ASS failed:", e);
     await message("导出失败: " + e, { title: "错误", kind: "error" });
   }
 }
@@ -372,6 +404,8 @@ async function initApp() {
   saveProjBtn = document.querySelector("#save-proj");
   loadProjBtn = document.querySelector("#load-proj");
   exportSrtBtn = document.querySelector("#export-srt");
+  exportAssBtn = document.querySelector("#export-ass");
+  minNoteDurInput = document.querySelector("#min-note-duration");
   pitchFontInput = document.querySelector("#font-pitch");
   lyricFontInput = document.querySelector("#font-lyric");
   selectModelBtn = document.querySelector("#select-model");
@@ -411,6 +445,7 @@ async function initApp() {
   saveProjBtn?.addEventListener("click", doSaveProject);
   loadProjBtn?.addEventListener("click", doLoadProject);
   exportSrtBtn?.addEventListener("click", doExportSrt);
+  exportAssBtn?.addEventListener("click", doExportAss);
   selectModelBtn?.addEventListener("click", () => { doSelectModel(); });
   statusEl?.addEventListener("click", () => {
     if (!isAnalyzerInitialized) {

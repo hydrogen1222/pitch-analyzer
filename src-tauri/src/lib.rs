@@ -1,5 +1,5 @@
 use crate::analyzer::PitchAnalyzer;
-use crate::models::{AnalyzerConfig, LyricLine, PitchTrack, ProjectData};
+use crate::models::{AnalysisParams, LyricLine, NoteTrackingParams, PitchTrack, ProjectData};
 use crate::playback::AudioPlayer;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -10,9 +10,11 @@ mod analyzer;
 pub mod audio;
 pub mod decoder;
 pub mod dsp;
+pub mod export;
 pub mod lyrics;
 pub mod mel;
 pub mod models;
+pub mod note_tracker;
 pub mod playback;
 
 struct AppState {
@@ -21,16 +23,8 @@ struct AppState {
     lyrics: Mutex<Vec<LyricLine>>,
     player: Mutex<Option<AudioPlayer>>,
     audio_path: Mutex<Option<String>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct AnalysisParams {
-    confidence_threshold: f32,
-    fmin: f32,
-    fmax: f32,
-    smoothing: f64,
-    median_smoothing: f64,
-    quantize: bool,
+    /// 当前分析参数 (全局只使用同一套参数)
+    analysis_params: Mutex<Option<AnalysisParams>>,
 }
 
 fn find_model_files(app_handle: &tauri::AppHandle) -> Option<(PathBuf, PathBuf)> {
@@ -250,9 +244,9 @@ async fn init_analyzer_with_paths(
         .iter().filter_map(|v| v.as_f64().map(|x| x as f32)).collect();
     let analyzer = PitchAnalyzer::new(&mdl_path.to_string_lossy(), cent_table)
         .map_err(|e| format!("初始化 analyzer 失败: {}", e))?;
-    
+
     *app_state.analyzer.lock().unwrap() = Some(analyzer);
-    
+
     // 初始化播放器
     match AudioPlayer::new() {
         Ok(player) => *app_state.player.lock().unwrap() = Some(player),
@@ -272,20 +266,13 @@ async fn analyze_audio(
 ) -> Result<PitchTrack, String> {
     use tauri::Emitter;
 
-    let config = AnalyzerConfig {
-        confidence_threshold: params.confidence_threshold,
-        fmin: params.fmin,
-        fmax: params.fmax,
-        smoothing: params.smoothing as usize,
-        median_smoothing: params.median_smoothing as usize,
-        quantize: params.quantize,
-    };
+    let config = params.to_analyzer_config();
 
     let track = {
         let guard = app_state.analyzer.lock().unwrap();
         let analyzer = guard.as_ref().ok_or_else(|| "Analyzer 尚未初始化".to_string())?;
         let app_handle_clone = app_handle.clone();
-        
+
         analyzer.analyze(&audio_path, &config, move |progress, stage| {
             let _ = app_handle_clone.emit("analysis-progress", ProgressPayload {
                 progress,
@@ -299,6 +286,8 @@ async fn analyze_audio(
         let _ = player.load(&audio_path);
     }
     *app_state.audio_path.lock().unwrap() = Some(audio_path);
+    // 保存当前参数，供 rebind 与导出使用同一阈值
+    *app_state.analysis_params.lock().unwrap() = Some(params);
     // 重新绑定 pitch 到歌词
     let t = track.clone();
     *app_state.track.lock().unwrap() = Some(track);
@@ -312,21 +301,33 @@ fn load_lyrics_lrc(app_state: tauri::State<AppState>, path: String) -> Result<Ve
     let duration = app_state.track.lock().unwrap().as_ref()
         .map(|t| t.times.last().copied().unwrap_or(0.0));
     let mut lines = crate::lyrics::parse_lrc(&content, duration);
-    crate::lyrics::distribute_token_times(&mut lines);
-    let result = lines.clone();
+    // 句级约束下根据音频特征做字级对齐 (无 track 时回退均匀分配)
+    {
+        let track_guard = app_state.track.lock().unwrap();
+        match track_guard.as_ref() {
+            Some(track) => {
+                let align_params = crate::lyrics::TokenAlignParams::default();
+                crate::lyrics::align_token_times(&mut lines, track, &align_params);
+            }
+            None => {
+                crate::lyrics::distribute_token_times(&mut lines);
+            }
+        }
+    }
+    // 先写入 state → rebind → 从更新后的 state clone → 返回
     *app_state.lyrics.lock().unwrap() = lines;
     rebind_lyrics(&app_state);
-    Ok(result)
+    Ok(app_state.lyrics.lock().unwrap().clone())
 }
 
 #[tauri::command]
 fn load_lyrics_txt(app_state: tauri::State<AppState>, path: String) -> Result<Vec<LyricLine>, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| format!("读取失败: {}", e))?;
     let lines = crate::lyrics::parse_txt(&content);
-    let result = lines.clone();
+    // 先写入 state → rebind → 从更新后的 state clone → 返回
     *app_state.lyrics.lock().unwrap() = lines;
     rebind_lyrics(&app_state);
-    Ok(result)
+    Ok(app_state.lyrics.lock().unwrap().clone())
 }
 
 #[tauri::command]
@@ -335,14 +336,23 @@ fn clear_lyrics(app_state: tauri::State<AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// 使用当前共享参数 rebind 歌词 (不再硬编码 0.3)
 fn rebind_lyrics(app_state: &tauri::State<AppState>) {
     let track_guard = app_state.track.lock().unwrap();
     let track = match track_guard.as_ref() {
         Some(t) => t,
         None => return,
     };
+    let params = app_state.analysis_params.lock().unwrap().clone().unwrap_or_default();
+    let mut note_tracking = NoteTrackingParams::default();
+    note_tracking.min_note_duration_ms = params.min_note_duration_ms;
     let mut lyrics_guard = app_state.lyrics.lock().unwrap();
-    crate::lyrics::bind_pitch_to_tokens(&mut lyrics_guard, track, 0.3);
+    crate::lyrics::bind_pitch_to_tokens(
+        &mut lyrics_guard,
+        track,
+        params.confidence_threshold,
+        &note_tracking,
+    );
 }
 
 #[tauri::command]
@@ -397,16 +407,34 @@ fn save_project(app_state: tauri::State<AppState>, path: String) -> Result<(), S
         audio_path: app_state.audio_path.lock().unwrap().clone(),
         pitch_track: app_state.track.lock().unwrap().clone(),
         lyrics: app_state.lyrics.lock().unwrap().clone(),
+        analysis_params: app_state.analysis_params.lock().unwrap().clone(),
     };
     let json = serde_json::to_string_pretty(&data).map_err(|e| format!("序列化失败: {}", e))?;
     std::fs::write(&path, json).map_err(|e| format!("写入失败: {}", e))?;
     Ok(())
 }
 
+/// 加载工程: 统一恢复 track / lyrics / params / audio_path / 播放器 后端状态
 #[tauri::command]
-fn load_project(path: String) -> Result<ProjectData, String> {
+fn load_project(app_state: tauri::State<AppState>, path: String) -> Result<ProjectData, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| format!("读取失败: {}", e))?;
-    serde_json::from_str(&content).map_err(|e| format!("解析失败: {}", e))
+    let data: ProjectData = serde_json::from_str(&content).map_err(|e| format!("解析失败: {}", e))?;
+
+    *app_state.track.lock().unwrap() = data.pitch_track.clone();
+    *app_state.lyrics.lock().unwrap() = data.lyrics.clone();
+    *app_state.audio_path.lock().unwrap() = data.audio_path.clone();
+    *app_state.analysis_params.lock().unwrap() = data.analysis_params.clone();
+
+    // 恢复播放器 (音频文件存在时)
+    if let Some(audio) = &data.audio_path {
+        if Path::new(audio).exists() {
+            if let Some(player) = app_state.player.lock().unwrap().as_ref() {
+                let _ = player.load(audio);
+            }
+        }
+    }
+
+    Ok(data)
 }
 
 #[tauri::command]
@@ -414,17 +442,21 @@ fn export_srt(app_state: tauri::State<AppState>, path: String) -> Result<(), Str
     let track = app_state.track.lock().unwrap();
     let track = track.as_ref().ok_or_else(|| "没有分析数据".to_string())?;
     let lyrics = app_state.lyrics.lock().unwrap();
-    crate::lyrics::export_srt(track, &lyrics, Path::new(&path))
+    crate::export::srt::export_srt(track, &lyrics, Path::new(&path))
+}
+
+#[tauri::command]
+fn export_ass(app_state: tauri::State<AppState>, path: String) -> Result<(), String> {
+    if app_state.track.lock().unwrap().is_none() {
+        return Err("没有分析数据，请先分析音频".to_string());
+    }
+    let lyrics = app_state.lyrics.lock().unwrap();
+    crate::export::ass::export_ass(&lyrics, Path::new(&path), 40, 28)
 }
 
 #[tauri::command]
 fn midi_to_note_name(midi: f32) -> String {
-    let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-    if midi.is_nan() {
-        return "---".to_string();
-    }
-    let m = midi.round() as i32;
-    format!("{}{}", names[(((m % 12) + 12) % 12) as usize], m / 12 - 1)
+    crate::models::midi_to_note_name(midi)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -436,6 +468,7 @@ pub fn run() {
             lyrics: Mutex::new(Vec::new()),
             player: Mutex::new(None),
             audio_path: Mutex::new(None),
+            analysis_params: Mutex::new(None),
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -456,6 +489,7 @@ pub fn run() {
             save_project,
             load_project,
             export_srt,
+            export_ass,
             midi_to_note_name,
         ])
         .run(tauri::generate_context!())

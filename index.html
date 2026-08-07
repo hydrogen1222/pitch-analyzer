@@ -60,6 +60,10 @@
               <label for="smoothing">曲线平滑</label>
               <input type="number" id="smoothing" step="2" min="0" max="31" value="15">
             </div>
+            <div class="field">
+              <label for="min-note-duration">最短音符时长 (ms)</label>
+              <input type="number" id="min-note-duration" step="5" min="10" max="200" value="45">
+            </div>
           </div>
         </div>
 
@@ -83,6 +87,9 @@
             <button class="btn btn-secondary" id="select-model">⚙️ 载入外部模型</button>
             <button class="btn btn-secondary" id="export-srt" disabled>📋 导出 SRT</button>
           </div>
+          <button class="btn btn-secondary" id="export-ass" style="width: 100%; margin-top: 8px;" disabled>
+            🎞️ 导出 ASS (音高字幕)
+          </button>
         </div>
 
         <div class="sidebar-footer">
