@@ -6,6 +6,102 @@ use std::cmp::Ordering;
 
 // ── Tokenizer ──────────────────────────────────────────────
 
+/// 小書き仮名 / 長音符: 自身不成拍, 并入前一拍 (き+ゃ → きゃ, ラ+ー → ラー)
+fn is_japanese_attach_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{3041}' // ぁ
+            | '\u{3043}' // ぃ
+            | '\u{3045}' // ぅ
+            | '\u{3047}' // ぇ
+            | '\u{3049}' // ぉ
+            | '\u{3083}' // ゃ
+            | '\u{3084}' // ゅ
+            | '\u{3085}' // ょ
+            | '\u{30A1}' // ァ
+            | '\u{30A3}' // ィ
+            | '\u{30A5}' // ゥ
+            | '\u{30A7}' // ェ
+            | '\u{30A9}' // ォ
+            | '\u{30E3}' // ャ
+            | '\u{30E4}' // ュ
+            | '\u{30E5}' // ョ
+            | '\u{30EE}' // ヮ
+            | '\u{30FC}' // ー
+    )
+}
+
+fn is_kana_char(c: char) -> bool {
+    ('\u{3041}'..='\u{309F}').contains(&c) || ('\u{30A0}'..='\u{30FF}').contains(&c)
+}
+
+fn is_kanji_char(c: char) -> bool {
+    ('\u{4E00}'..='\u{9FFF}').contains(&c) || ('\u{3400}'..='\u{4DBF}').contains(&c)
+}
+
+/// 拉丁词的音节估计: 元音簇个数 (hello=2, through=1)
+fn latin_syllable_count(word: &str) -> f32 {
+    let vowels = |c: char| matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y');
+    let mut count = 0f32;
+    let mut prev_vowel = false;
+    for c in word.to_lowercase().chars() {
+        if vowels(c) {
+            if !prev_vowel {
+                count += 1.0;
+            }
+            prev_vowel = true;
+        } else {
+            prev_vowel = false;
+        }
+    }
+    count.max(1.0)
+}
+
+/// 估算一个 token 对应的莫拉 (拍) 数。
+/// 无词典的启发式: 假名=1, 汉字≈1.8 (日语汉字平均 1.7~2.1 拍), 拉丁词=元音簇数。
+/// 用于 DP 对齐的时长分配与均匀分配的加权。
+pub fn token_weight(text: &str) -> f32 {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return 1.0;
+    }
+    if chars[0].is_ascii_alphabetic() {
+        return latin_syllable_count(text);
+    }
+    let mut w = 0.0f32;
+    for &c in &chars {
+        if is_kanji_char(c) {
+            w += 1.8;
+        } else if is_japanese_attach_char(c) {
+            // 小書き/長音符已并入前一拍, 不重复计拍
+        } else {
+            w += 1.0;
+        }
+    }
+    w.max(1.0)
+}
+
+/// 日文拍合并: 小書き/長音符并入前一假名 token (ドラマ歌词 "シー" ン 不再拆成 3 拍)
+fn merge_japanese_attach_chars(tokens: &mut Vec<String>) {
+    let mut i = 1;
+    while i < tokens.len() {
+        let mut chars = tokens[i].chars();
+        let is_single_attach = tokens[i].chars().count() == 1
+            && chars.next().map(is_japanese_attach_char).unwrap_or(false);
+        let prev_ends_kana = tokens[i - 1]
+            .chars()
+            .last()
+            .map(is_kana_char)
+            .unwrap_or(false);
+        if is_single_attach && prev_ends_kana {
+            let attach = tokens.remove(i);
+            tokens[i - 1].push_str(&attach);
+        } else {
+            i += 1;
+        }
+    }
+}
+
 pub fn tokenize(text: &str) -> Vec<String> {
     if text.is_empty() {
         return Vec::new();
@@ -34,6 +130,7 @@ pub fn tokenize(text: &str) -> Vec<String> {
             merged.push(token.to_string());
         }
     }
+    merge_japanese_attach_chars(&mut merged);
     merged
 }
 
@@ -400,12 +497,14 @@ fn distribute_line_times(line: &mut LyricLine, start: f32, end: f32) {
         return;
     }
     let duration = (end - start).max(0.1);
-    let token_dur = duration / line.tokens.len() as f32;
+    // 按莫拉数加权分配 (汉字 ≈1.8 拍, 假名 =1 拍), 而非机械等分
+    let weights: Vec<f32> = line.tokens.iter().map(|t| token_weight(&t.text)).collect();
+    let total_w: f32 = weights.iter().sum::<f32>().max(1.0);
     let mut current = start;
-    for token in &mut line.tokens {
+    for (token, &w) in line.tokens.iter_mut().zip(&weights) {
         token.start_time = Some(current);
-        token.end_time = Some(current + token_dur);
-        current += token_dur;
+        token.end_time = Some(current + duration * w / total_w);
+        current += duration * w / total_w;
     }
 }
 
@@ -513,8 +612,14 @@ fn dp_align_line(
     }
 
     let total_dur = align_end - align_start;
-    let ideal = total_dur / n_tokens as f32;
-    let min_dur = (params.min_token_duration_ms / 1000.0).min(ideal);
+
+    // 莫拉加权: 汉字 ≈1.8 拍, 假名 =1 拍, 拉丁词 = 元音簇数。
+    // 期望时长按权重分配, 否则 "心を砕いた嵐の中" (8字 13拍) 会被切成 8 等份,
+    // 边界全部落在拍子中间
+    let weights: Vec<f32> = line.tokens.iter().map(|t| token_weight(&t.text)).collect();
+    let total_w: f32 = weights.iter().sum::<f32>().max(1.0);
+    let ideal_unit = total_dur / total_w;
+    let min_dur = (params.min_token_duration_ms / 1000.0).min(ideal_unit);
 
     // 边界得分: 无音间隙 / F0 变化 / RMS 能量谷 → 好的音节边界
     let boundary_score = |fi: usize| -> f32 {
@@ -549,11 +654,12 @@ fn dp_align_line(
     let mut dp = vec![vec![inf; m]; n_tokens];
     let mut parent = vec![vec![usize::MAX; m]; n_tokens];
 
-    let seg_cost = |prev_t: f32, cur_t: f32, score: f32| -> f32 {
+    let seg_cost = |prev_t: f32, cur_t: f32, score: f32, w: f32| -> f32 {
         let dur = cur_t - prev_t;
         if dur < min_dur {
             return inf;
         }
+        let ideal = (w * ideal_unit).max(min_dur);
         let dur_cost = (dur - ideal).abs() / ideal.max(1e-3);
         let bnd_cost = -score * 0.8;
         dur_cost + bnd_cost
@@ -565,7 +671,7 @@ fn dp_align_line(
         if t1 <= align_start {
             continue;
         }
-        dp[0][j] = seg_cost(align_start, t1, boundary_score(fidx[j]));
+        dp[0][j] = seg_cost(align_start, t1, boundary_score(fidx[j]), weights[0]);
     }
 
     // 中间 token
@@ -579,7 +685,7 @@ fn dp_align_line(
                     continue;
                 }
                 let t_p = time_at(p);
-                let c = dp[k - 1][p] + seg_cost(t_p, t_j, boundary_score(fidx[j]));
+                let c = dp[k - 1][p] + seg_cost(t_p, t_j, boundary_score(fidx[j]), weights[k]);
                 if c < best {
                     best = c;
                     bp = p;
@@ -598,7 +704,7 @@ fn dp_align_line(
             continue;
         }
         let t_j = time_at(j);
-        let c = dp[last_k][j] + seg_cost(t_j, align_end, 0.0);
+        let c = dp[last_k][j] + seg_cost(t_j, align_end, 0.0, weights[n_tokens - 1]);
         if c < best_cost {
             best_cost = c;
             best_j = j;

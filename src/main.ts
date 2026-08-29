@@ -485,6 +485,8 @@ async function initApp() {
         }
       } catch (_) {}
     }
+    // 歌词组件的时间必须每帧同步 (此前只在拖进度条时更新, 播放中歌词冻结)
+    if (karaokeDisplay) karaokeDisplay.setTime(state.currentTime);
     updateCurrentPitch();
     updateTimeDisplay();
     if (pitchCanvas) pitchCanvas.draw();

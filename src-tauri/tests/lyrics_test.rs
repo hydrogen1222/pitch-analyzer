@@ -1,5 +1,6 @@
 use pitch_analyzer_tauri_lib::lyrics::{
-    align_token_times, bind_pitch_to_tokens, parse_lrc, parse_txt, select_primary_note, tokenize,
+    align_token_times, bind_pitch_to_tokens, distribute_token_times, parse_lrc, parse_txt,
+    select_primary_note, tokenize,
 };
 use pitch_analyzer_tauri_lib::models::{NoteEvent, NoteTrackingParams, PitchNote, PitchTrack};
 
@@ -268,4 +269,84 @@ fn test_parse_lrc_repeat_tags_at_line_start() {
     assert_eq!(lines[0].start_time, Some(10.0));
     assert_eq!(lines[1].start_time, Some(80.0));
     assert_eq!(lines[0].primary_text, "chorus line");
+}
+
+// ── 日语莫拉对齐 ──────────────────────────────────────────────
+
+use pitch_analyzer_tauri_lib::lyrics::token_weight;
+
+/// 小書き仮名/長音符并入前一拍: きゃ=1拍, ラー=1拍
+#[test]
+fn test_japanese_attach_char_merge() {
+    let toks = tokenize("きゃりーぱみゅぱみゅ");
+    assert_eq!(
+        toks,
+        vec!["きゃ", "りー", "ぱ", "みゅ", "ぱ", "みゅ"],
+        "small kana and chōonpu must merge into previous beat: {:?}",
+        toks
+    );
+    // 前一 token 不是假名时不合并
+    let toks2 = tokenize("AーB");
+    assert_ne!(toks2.first().map(|s| s.as_str()), Some("Aー"));
+}
+
+/// 权重: 汉字 ≈1.8 拍, 假名 =1 拍, 拉丁词 = 元音簇数
+#[test]
+fn test_token_weight_heuristics() {
+    assert!((token_weight("心") - 1.8).abs() < 1e-4);
+    assert!((token_weight("きゃ") - 1.0).abs() < 1e-4);
+    assert!((token_weight("りー") - 1.0).abs() < 1e-4);
+    assert!((token_weight("hello") - 2.0).abs() < 1e-4, "he-llo = 2 syllables");
+    assert!((token_weight("through") - 1.0).abs() < 1e-4);
+    assert!((token_weight("魔法") - 3.6).abs() < 1e-4);
+}
+
+/// 加权分配: "心を砕いた" (心=1.8, を=1, 砕=1.8, い=1, た=1, 总 6.6)
+/// 10s 无特征音轨 → 心 应拿 10*1.8/6.6 = 2.727s, 而不是等分 2s
+#[test]
+fn test_weighted_distribute() {
+    let mut lines = parse_lrc("[00:00.000]心を砕いた[00:10.000]", Some(10.0));
+    assert_eq!(lines[0].tokens.len(), 5, "{:?}", lines[0].tokens.iter().map(|t| &t.text).collect::<Vec<_>>());
+    distribute_token_times(&mut lines);
+    let durs: Vec<f32> = lines[0].tokens.iter().map(|t| t.end_time.unwrap() - t.start_time.unwrap()).collect();
+    let kanji_dur = durs[0];
+    let kana_dur = durs[1];
+    assert!(
+        (kanji_dur - 10.0 * 1.8 / 6.6).abs() < 0.01,
+        "kanji should get 1.8/6.6 of the line, got {:.3}",
+        kanji_dur
+    );
+    assert!(
+        (kana_dur - 10.0 * 1.0 / 6.6).abs() < 0.01,
+        "kana should get 1.0/6.6 of the line, got {:.3}",
+        kana_dur
+    );
+    assert!((kanji_dur / kana_dur - 1.8).abs() < 0.01);
+}
+
+/// 转音 (一字多音) 场景: 一个 token 窗口内 C4(短) → E4(长) → 主音必须是 E4,
+/// 且两个音都保留在 pitch_notes 里
+#[test]
+fn test_melisma_token_binding() {
+    let times: Vec<f32> = (0..100).map(|i| i as f32 * 0.01).collect();
+    let track = PitchTrack {
+        times: times.clone(),
+        frequencies: vec![261.63; 100],
+        confidences: vec![0.9; 100],
+        midis: {
+            let mut m = vec![60.0; 20]; // C4 0-0.2s (转音起音)
+            m.extend(vec![64.0; 80]); // E4 0.2-1.0s (主音)
+            m
+        },
+        rms: Vec::new(),
+        note_events: Vec::new(),
+    };
+    let mut lines = parse_lrc("[00:00.000]ああ", Some(1.0));
+    distribute_token_times(&mut lines);
+    bind_pitch_to_tokens(&mut lines, &track, 0.3, &NoteTrackingParams::default());
+    let first = &lines[0].tokens[0];
+    // 帧 0-20 属于第一个 token (0~0.5s 均匀分配)
+    assert!(first.pitch_notes.len() >= 2, "melisma token must keep all notes: {:?}", first.pitch_notes);
+    let primary = first.primary_note.as_ref().unwrap();
+    assert_eq!(primary.rounded_midi, 64, "primary must be the long E4, not first C4");
 }
