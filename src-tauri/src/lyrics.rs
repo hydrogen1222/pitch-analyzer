@@ -64,6 +64,7 @@ pub fn parse_txt(text: &str) -> Vec<LyricLine> {
             tokens,
             primary_text: trimmed.to_string(),
             translations: Vec::new(),
+            token_timing_auto: false,
         });
     }
     lines
@@ -74,11 +75,15 @@ pub fn parse_txt(text: &str) -> Vec<LyricLine> {
 pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
     let time_re = Regex::new(r"\[(\d{2}):(\d{2}\.\d{2,3})\]")
         .expect("Invalid LRC time regex pattern");
+    let word_re = Regex::new(r"<(\d{1,3}):(\d{2})(?:\.(\d{1,3}))?>")
+        .expect("Invalid enhanced LRC word regex pattern");
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct RawEntry {
         start_time: f32,
         text: String,
+        /// enhanced LRC 逐字块: (该块起始时间, 块文本)。首块时间为 None。
+        chunks: Vec<(Option<f32>, String)>,
     }
 
     let mut entries: Vec<RawEntry> = Vec::new();
@@ -91,17 +96,63 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
         if captures.is_empty() {
             continue;
         }
-        let content = time_re.replace_all(trimmed, "").trim().to_string();
-        if content.is_empty() {
+        let raw_content = time_re.replace_all(trimmed, "").trim().to_string();
+        if raw_content.is_empty() {
             continue;
         }
+
+        // 切分 enhanced LRC 逐字块: <00:12.00>如<00:12.50>果
+        let mut chunks: Vec<(Option<f32>, String)> = Vec::new();
+        let mut last_pos = 0usize;
+        for cap in word_re.captures_iter(&raw_content) {
+            let m = cap.get(0).unwrap();
+            let secs: f32 = {
+                let mins: f32 = cap[1].parse().unwrap_or(0.0);
+                let s: f32 = cap[2].parse().unwrap_or(0.0);
+                let frac = cap.get(3).map(|f| {
+                    let digits = f.as_str();
+                    let v: f32 = digits.parse().unwrap_or(0.0);
+                    v / 10f32.powi(digits.len() as i32)
+                });
+                mins * 60.0 + s + frac.unwrap_or(0.0)
+            };
+            let before = raw_content[last_pos..m.start()].trim().to_string();
+            chunks.push((if chunks.is_empty() { None } else { chunks.last().unwrap().0 }, before));
+            chunks.push((Some(secs), String::new()));
+            last_pos = m.end();
+        }
+        let tail = raw_content[last_pos..].trim().to_string();
+        chunks.push((chunks.last().and_then(|c| c.0), tail));
+
+        let word_tag_count = chunks.iter().filter(|(t, _)| t.is_some()).count();
+        let (text_clean, chunks) = if word_tag_count >= 2 {
+            // 相邻空块合并, 得到 [(None|Some, 文本), ...]
+            let mut merged_chunks: Vec<(Option<f32>, String)> = Vec::new();
+            for (t, s) in chunks {
+                let s = s.trim().to_string();
+                if !merged_chunks.is_empty() && merged_chunks.last().unwrap().0 == t {
+                    merged_chunks.last_mut().unwrap().1.push_str(&s);
+                } else {
+                    merged_chunks.push((t, s));
+                }
+            }
+            let text_clean: String = word_re.replace_all(&raw_content, "").split_whitespace().collect::<Vec<_>>().join(" ");
+            (text_clean, merged_chunks)
+        } else {
+            (word_re.replace_all(&raw_content, "").trim().to_string(), vec![(None, raw_content.clone())])
+        };
+        if text_clean.is_empty() {
+            continue;
+        }
+
         for cap in &captures {
             let mins: f32 = cap[1].parse().unwrap_or(0.0);
             let secs: f32 = cap[2].parse().unwrap_or(0.0);
             let time_sec = mins * 60.0 + secs;
             entries.push(RawEntry {
                 start_time: time_sec,
-                text: content.clone(),
+                text: text_clean.clone(),
+                chunks: chunks.clone(),
             });
         }
     }
@@ -112,6 +163,7 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
         start_time: f32,
         text: String,
         translations: Vec<String>,
+        chunks: Vec<(Option<f32>, String)>,
     }
     let mut merged: Vec<MergedEntry> = Vec::new();
     for entry in entries {
@@ -125,6 +177,7 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
             start_time: entry.start_time,
             text: entry.text,
             translations: Vec::new(),
+            chunks: entry.chunks,
         });
     }
 
@@ -161,16 +214,101 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
             format!("{} | {}", primary_text, entry.translations.join(" / "))
         };
 
-        lines.push(LyricLine {
+        let mut line = LyricLine {
             text: display_text,
             start_time: Some(start_time),
             end_time: Some(end_time),
             tokens,
             primary_text,
             translations: entry.translations.clone(),
-        });
+            token_timing_auto: false,
+        };
+
+        // enhanced LRC: 歌词自带逐字时间 → 直接使用, 不做自动估计
+        let timed_chunks: Vec<(f32, String)> = entry
+            .chunks
+            .iter()
+            .filter(|(t, s)| t.is_some() && !s.trim().is_empty())
+            .map(|(t, s)| (t.unwrap(), s.clone()))
+            .collect();
+        if timed_chunks.len() >= 2 {
+            apply_word_timings(&mut line, &timed_chunks, end_time);
+        }
+
+        lines.push(line);
     }
     lines
+}
+
+/// 将 enhanced LRC 的逐字块时间应用到 token:
+/// 有锚定时间的块取块时间，块内多 token / 无锚定的 token 在相邻锚点间均匀分配。
+fn apply_word_timings(line: &mut LyricLine, timed_chunks: &[(f32, String)], line_end: f32) {
+    // 展开: [(token_text, anchor_time: Option<f32>), ...]
+    let mut items: Vec<(String, Option<f32>)> = Vec::new();
+    for (t, s) in timed_chunks {
+        for tok in tokenize(s) {
+            items.push((tok, Some(*t)));
+        }
+    }
+    if items.len() < 2 {
+        return;
+    }
+    if items.len() != line.tokens.len() {
+        // 分词结果与逐字块不一致 (少见), 放弃逐字时间, 走自动估计
+        return;
+    }
+
+    // 锚点序列: 用于给无锚定 token 插值
+    let anchors: Vec<usize> = items.iter().enumerate().filter(|(_, (_, a))| a.is_some()).map(|(i, _)| i).collect();
+    for k in 0..line.tokens.len() {
+        let start = match items[k].1 {
+            Some(t) => t,
+            None => {
+                // 前后最近锚点间均匀插值
+                let prev = anchors.iter().rev().find(|&&a| a < k).map(|&a| (a, items[a].1.unwrap()));
+                let next = anchors.iter().find(|&&a| a > k).map(|&a| (a, items[a].1.unwrap()));
+                let (t0, t1) = match (prev, next) {
+                    (Some((_, ta)), Some((_, tb))) => (ta, tb),
+                    (Some((_, ta)), None) => (ta, line_end.max(ta)),
+                    (None, Some((_, tb))) => (line.start_time.unwrap_or(0.0), tb),
+                    (None, None) => continue,
+                };
+                let n_between = next.map(|(a, _)| a).unwrap_or(line.tokens.len())
+                    - prev.map(|(a, _)| a + 1).unwrap_or(0);
+                let n_between = n_between.max(1);
+                let idx = k - prev.map(|(a, _)| a + 1).unwrap_or(0);
+                t0 + (t1 - t0) * (idx as f32 / n_between as f32)
+            }
+        };
+        line.tokens[k].start_time = Some(start);
+    }
+    // end_time = 下一个 token 的 start (最后者取 line_end)
+    for k in 0..line.tokens.len() {
+        let end = if k + 1 < line.tokens.len() {
+            line.tokens[k + 1].start_time
+        } else {
+            Some(line_end)
+        };
+        line.tokens[k].end_time = end;
+    }
+    // 首尾兜底: 首个 token 的 start 不早于行起点
+    if let Some(ls) = line.start_time {
+        for k in 0..line.tokens.len() {
+            if let Some(s) = line.tokens[k].start_time {
+                if s < ls {
+                    line.tokens[k].start_time = Some(ls);
+                }
+            }
+        }
+    }
+    // 全部有效才算逐字时间成功
+    if line.tokens.iter().all(|t| t.start_time.is_some() && t.end_time.is_some()) {
+        return;
+    }
+    for t in line.tokens.iter_mut() {
+        t.start_time = None;
+        t.end_time = None;
+    }
 }
 
 // ── Token 时间分配 / 对齐 ──────────────────────────────────
@@ -204,7 +342,14 @@ pub fn distribute_token_times(lines: &mut [LyricLine]) {
             Some(t) => t,
             None => continue,
         };
+        // enhanced LRC 自带的逐字时间不动
+        if line.tokens.iter().all(|t| t.start_time.is_some() && t.end_time.is_some())
+            && !line.token_timing_auto
+        {
+            continue;
+        }
         distribute_line_times(line, start, end);
+        line.token_timing_auto = true;
     }
 }
 
@@ -235,12 +380,18 @@ pub fn align_token_times(lines: &mut [LyricLine], track: &PitchTrack, params: &T
         if line.tokens.is_empty() {
             continue;
         }
-        // 已有逐字时间 (如 enhanced LRC) → 不重新估计
-        if line.tokens.iter().all(|t| t.start_time.is_some() && t.end_time.is_some()) {
+        // 已有逐字时间且非自动估计 (如 enhanced LRC) → 不重新估计;
+        // 自动估计过的时间在音轨更新后 (重新分析) 需要重新对齐
+        if line.tokens.iter().all(|t| t.start_time.is_some() && t.end_time.is_some())
+            && !line.token_timing_auto
+        {
             continue;
         }
-        if !dp_align_line(line, track, start, end, params) {
+        if dp_align_line(line, track, start, end, params) {
+            line.token_timing_auto = true;
+        } else {
             distribute_line_times(line, start, end);
+            line.token_timing_auto = true;
         }
     }
 }

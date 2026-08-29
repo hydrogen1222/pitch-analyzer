@@ -73,12 +73,19 @@ impl PitchAnalyzer {
         progress_cb(0.8, "解码音高特征数据...");
         let (f0, conf) = self.decoder.decode(latent_2d, config.confidence_threshold);
 
+        // Compute RMS *before* DSP for VAD (Voice Activity Detection)
+        // This prevents false positives on silent tracks
+        let rms = compute_rms_envelope(&audio.samples, f0.len());
+
         // 5. DSP 后处理
         progress_cb(0.9, "应用 DSP 后处理平滑滤波...");
+        let rms_threshold = 0.005; // -46 dBFS silence threshold
         let (times, frequencies, midis) = post_process(
             &f0,
             &conf,
+            &rms,
             config.confidence_threshold,
+            rms_threshold,
             config.fmin,
             config.fmax,
             config.median_smoothing,
@@ -96,9 +103,6 @@ impl PitchAnalyzer {
         let frequencies = frequencies[..min_len].to_vec();
         let midis = midis[..min_len].to_vec();
         let confidences = conf[..min_len].to_vec();
-
-        // 7. 逐帧 RMS 包络 (供歌词字级对齐)
-        let rms = compute_rms_envelope(&audio.samples, times.len());
 
         // 8. Clean Pitch → NoteEvent (Annotation Note Track)
         let note_events =

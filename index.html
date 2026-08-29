@@ -15,57 +15,7 @@
         <div class="sidebar-title">人声音高测量</div>
         <div class="sidebar-subtitle">基于 FCPE 深度学习模型</div>
 
-        <div class="panel">
-          <div class="panel-title">快速预设</div>
-          <div class="panel-desc">选择适合的场景，自动配置最佳参数</div>
-          <div class="preset-buttons">
-            <button class="preset-btn" data-preset="pop">流行</button>
-            <button class="preset-btn" data-preset="folk">民谣</button>
-            <button class="preset-btn" data-preset="classical">古典</button>
-          </div>
-          <div class="preset-desc" id="preset-desc"></div>
-        </div>
-
-        <div class="panel">
-          <div class="panel-title">基础设置</div>
-          <div class="field">
-            <label for="confidence">置信阈值</label>
-            <input type="number" id="confidence" step="0.05" min="0.05" max="0.95" value="0.3">
-          </div>
-          <div class="field">
-            <label for="fmin">最低频率 (Hz)</label>
-            <input type="number" id="fmin" step="1" min="20" max="200" value="65">
-          </div>
-          <div class="field">
-            <label for="fmax">最高频率 (Hz)</label>
-            <input type="number" id="fmax" step="1" min="500" max="5000" value="1300">
-          </div>
-          <div class="field">
-            <label for="quantize">对齐到半音</label>
-            <input type="checkbox" id="quantize">
-          </div>
-        </div>
-
-        <div class="panel">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-            <div class="panel-title" style="margin-bottom: 0;">平滑与降噪</div>
-            <button class="advanced-toggle" id="advanced-toggle">展开</button>
-          </div>
-          <div class="advanced-content" id="advanced-content" style="display: none;">
-            <div class="field">
-              <label for="median">峰值过滤</label>
-              <input type="number" id="median" step="2" min="0" max="31" value="11">
-            </div>
-            <div class="field">
-              <label for="smoothing">曲线平滑</label>
-              <input type="number" id="smoothing" step="2" min="0" max="31" value="15">
-            </div>
-            <div class="field">
-              <label for="min-note-duration">最短音符时长 (ms)</label>
-              <input type="number" id="min-note-duration" step="5" min="10" max="200" value="45">
-            </div>
-          </div>
-        </div>
+        <!-- 参数设置面板已被移除，提供开箱即用体验 -->
 
         <div class="panel">
           <div class="panel-title">文件操作</div>

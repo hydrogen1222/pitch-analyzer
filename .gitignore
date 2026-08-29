@@ -71,3 +71,11 @@ RELEASE_GUIDE.md
 src-tauri/resources/*.so
 src-tauri/resources/*.dll
 src-tauri/resources/*.dylib
+# 本地测试产物 (样例字幕导出)
+test_output/
+
+# 根目录测试用歌曲 (版权音频, 不入库)
+/*.flac
+/*.wav
+/*.mp3
+/*.m4a

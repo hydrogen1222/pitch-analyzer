@@ -4,7 +4,6 @@ use pitch_analyzer_tauri_lib::export::ass::export_ass;
 use pitch_analyzer_tauri_lib::export::srt::export_srt;
 use pitch_analyzer_tauri_lib::lyrics::{distribute_token_times, parse_lrc, select_primary_note};
 use pitch_analyzer_tauri_lib::models::{PitchNote, PitchTrack};
-use std::path::PathBuf;
 
 fn track() -> PitchTrack {
     let n = 800;
@@ -42,7 +41,7 @@ fn test_export_ass_karaoke() {
     distribute_token_times(&mut lines);
     attach_primary(&mut lines);
 
-    let out = PathBuf::from("/tmp/test_export.ass");
+    let out = std::env::temp_dir().join("test_export.ass");
     export_ass(&lines, &out, 40, 28).unwrap();
     let content = std::fs::read_to_string(&out).unwrap();
 
@@ -89,7 +88,7 @@ fn test_export_ass_uses_primary_not_first() {
         }
     }
 
-    let out = PathBuf::from("/tmp/test_export_primary.ass");
+    let out = std::env::temp_dir().join("test_export_primary.ass");
     export_ass(&lines, &out, 40, 28).unwrap();
     let content = std::fs::read_to_string(&out).unwrap();
     assert!(content.contains("C4"));
@@ -98,7 +97,7 @@ fn test_export_ass_uses_primary_not_first() {
 
 #[test]
 fn test_export_ass_no_lyrics_error() {
-    let out = PathBuf::from("/tmp/test_empty.ass");
+    let out = std::env::temp_dir().join("test_empty.ass");
     let err = export_ass(&[], &out, 40, 28).unwrap_err();
     assert!(err.contains("没有歌词"), "expected no-lyrics error, got: {}", err);
 }
@@ -135,7 +134,7 @@ fn test_export_srt_primary_fallback() {
                 select_primary_note(&tok.pitch_notes, 0.0, 0.0);
         }
     }
-    let out = PathBuf::from("/tmp/test_srt_fallback.srt");
+    let out = std::env::temp_dir().join("test_srt_fallback.srt");
     export_srt(&track, &lines, &out).unwrap();
     let content = std::fs::read_to_string(&out).unwrap();
     assert!(content.contains("[C4]"), "SRT fallback must choose C4:\n{}", content);

@@ -254,7 +254,8 @@ fn test_end_to_end_real_audio() {
 
     // 5. post process
     let t = std::time::Instant::now();
-    let (times, freqs, midis) = post_process(&f0, &conf, 0.3, 65.0, 1300.0, 11, 15, false);
+    let dummy_rms = vec![1.0; f0.len()];
+    let (times, freqs, midis) = post_process(&f0, &conf, &dummy_rms, 0.3, 0.0, 65.0, 1300.0, 11, 15, false);
     println!("Post-process 耗时: {:?}", t.elapsed());
 
     // 统计

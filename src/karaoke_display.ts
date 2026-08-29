@@ -14,6 +14,18 @@ export class KaraokeDisplay {
   pitchFontSize: number = 48;
   lyricFontSize: number = 18;
 
+  // 音名读数抗抖: vibrato 跨半音边界时 round() 会高频闪烁,
+  // 候选音名需持续 noteHoldSecs 才替换 (MIDI 数值保持实时)
+  private shownNote: number | null = null;
+  private candidateNote: number | null = null;
+  private candidateSince: number = 0;
+  private noteHoldSecs: number = 0.07;
+
+  // 渲染缓存: 内容无变化时每帧只更新 MIDI 小字, 不重建整个 DOM
+  private lyricsVersion: number = 0;
+  private renderedKey: string = "";
+  private midiInfoEl: HTMLElement | null = null;
+
   constructor(container: HTMLElement, headerEl: HTMLElement, displayEl: HTMLElement) {
     this.container = container;
     this.headerEl = headerEl;
@@ -22,6 +34,7 @@ export class KaraokeDisplay {
 
   setLyrics(lines: LyricLine[]) {
     this.lyricsLines = lines;
+    this.lyricsVersion++;
   }
 
   setTime(time: number) {
@@ -29,7 +42,37 @@ export class KaraokeDisplay {
   }
 
   setCurrentMidi(midi: number | null) {
+    if (midi === null || !isFinite(midi)) {
+      this.currentMidi = null;
+      this.shownNote = null;
+      this.candidateNote = null;
+      return;
+    }
     this.currentMidi = midi;
+    const rounded = Math.round(midi);
+    if (this.shownNote === null) {
+      this.shownNote = rounded;
+      this.candidateNote = null;
+      return;
+    }
+    if (rounded === this.shownNote) {
+      this.candidateNote = null;
+      return;
+    }
+    if (this.candidateNote === rounded) {
+      if (this.currentTime - this.candidateSince >= this.noteHoldSecs) {
+        this.shownNote = rounded;
+        this.candidateNote = null;
+      }
+    } else {
+      this.candidateNote = rounded;
+      this.candidateSince = this.currentTime;
+    }
+  }
+
+  /// 当前稳定音名 (MIDI 数字), null = 无声
+  get stableNoteMidi(): number | null {
+    return this.shownNote;
   }
 
   setPitchFontSize(size: number) {
@@ -41,16 +84,39 @@ export class KaraokeDisplay {
   }
 
   render() {
-    if (this.lyricsLines.length > 0) {
-      this.renderLyrics();
+    const [lineIdx, tokenIdx] = this.findCurrentLineAndTokenIdx();
+    // 无歌词 (纯音高) 模式下音高数字必须每帧跟随, 把当前音高并入缓存键;
+    // 歌词模式下主内容与音高无关, 只每帧更新右下角小字
+    const midiPart = lineIdx < 0 ? (this.currentMidi !== null ? this.currentMidi.toFixed(2) : "none") : "lyrics";
+    const key = `${this.lyricsVersion}|${lineIdx}|${tokenIdx}|${this.pitchFontSize}|${this.lyricFontSize}|${midiPart}`;
+    if (key !== this.renderedKey) {
+      this.renderedKey = key;
+      this.midiInfoEl = null;
+      this.displayEl.innerHTML = "";
+      if (lineIdx >= 0) {
+        this.renderLyrics(this.lyricsLines[lineIdx], tokenIdx);
+      } else {
+        this.renderPitchOnly();
+      }
+    }
+    this.updateMidiInfo();
+  }
+
+  /// 每帧只更新右下角当前音高小字 (廉价 DOM 更新)
+  private updateMidiInfo() {
+    if (!this.midiInfoEl) return;
+    if (this.currentMidi !== null && isFinite(this.currentMidi) && this.shownNote !== null) {
+      const midiRounded = this.shownNote;
+      const oct = Math.floor(midiRounded / 12) - 1;
+      const noteName = NOTE_NAMES[((midiRounded % 12) + 12) % 12];
+      this.midiInfoEl.textContent = `音高: ${noteName}${oct} (${this.currentMidi.toFixed(2)})`;
     } else {
-      this.renderPitchOnly();
+      this.midiInfoEl.textContent = "";
     }
   }
 
   private renderPitchOnly() {
     this.headerEl.textContent = "当前音高";
-    this.displayEl.innerHTML = "";
 
     const wrap = document.createElement("div");
     wrap.style.display = "flex";
@@ -62,10 +128,15 @@ export class KaraokeDisplay {
     noteEl.style.fontSize = `${this.pitchFontSize}px`;
 
     if (this.currentMidi !== null && isFinite(this.currentMidi)) {
-      const midiRounded = Math.round(this.currentMidi);
-      const oct = Math.floor(midiRounded / 12) - 1;
-      const noteName = NOTE_NAMES[midiRounded % 12];
-      noteEl.textContent = `${noteName}${oct}`;
+      // 音名用保持后的稳定值 (抗 vibrato 闪烁), MIDI 数值保持实时
+      if (this.shownNote !== null) {
+        const midiRounded = this.shownNote;
+        const oct = Math.floor(midiRounded / 12) - 1;
+        const noteName = NOTE_NAMES[((midiRounded % 12) + 12) % 12];
+        noteEl.textContent = `${noteName}${oct}`;
+      } else {
+        noteEl.textContent = "---";
+      }
 
       const midiEl = document.createElement("div");
       midiEl.className = "karaoke-midi";
@@ -82,16 +153,8 @@ export class KaraokeDisplay {
     this.displayEl.appendChild(wrap);
   }
 
-  private renderLyrics() {
+  private renderLyrics(line: LyricLine, currentTokenIdx: number) {
     this.headerEl.textContent = "♪ 当前歌词";
-    this.displayEl.innerHTML = "";
-
-    const currentLineAndIdx = this.findCurrentLineAndToken();
-    if (!currentLineAndIdx) {
-      this.renderPitchOnly();
-      return;
-    }
-    const [line, currentTokenIdx] = currentLineAndIdx;
 
     const wrap = document.createElement("div");
     wrap.style.display = "flex";
@@ -141,7 +204,7 @@ export class KaraokeDisplay {
         noteEl.style.fontSize = `${Math.max(10, Math.floor(this.lyricFontSize * 0.55))}px`;
         const midiRounded = Math.round(primary.median_midi);
         const oct = Math.floor(midiRounded / 12) - 1;
-        const noteName = NOTE_NAMES[midiRounded % 12];
+        const noteName = NOTE_NAMES[((midiRounded % 12) + 12) % 12];
         noteEl.textContent = `${noteName}${oct}`;
         noteBox.appendChild(noteEl);
       }
@@ -182,13 +245,7 @@ export class KaraokeDisplay {
     bottomRightInfo.style.right = "20px";
     bottomRightInfo.style.fontSize = "11px";
     bottomRightInfo.style.color = "#888";
-
-    if (this.currentMidi !== null && isFinite(this.currentMidi)) {
-      const midiRounded = Math.round(this.currentMidi);
-      const oct = Math.floor(midiRounded / 12) - 1;
-      const noteName = NOTE_NAMES[midiRounded % 12];
-      bottomRightInfo.textContent = `音高: ${noteName}${oct} (${this.currentMidi.toFixed(2)})`;
-    }
+    this.midiInfoEl = bottomRightInfo;
 
     this.displayEl.appendChild(wrap);
     this.displayEl.appendChild(bottomRightInfo);
@@ -208,8 +265,9 @@ export class KaraokeDisplay {
     return best;
   }
 
-  private findCurrentLineAndToken(): [LyricLine, number] | null {
-    for (const line of this.lyricsLines) {
+  private findCurrentLineAndTokenIdx(): [number, number] {
+    for (let li = 0; li < this.lyricsLines.length; li++) {
+      const line = this.lyricsLines[li];
       if (line.start_time === null || line.end_time === null) continue;
       if (this.currentTime < line.start_time || this.currentTime > line.end_time) continue;
 
@@ -222,9 +280,9 @@ export class KaraokeDisplay {
           break;
         }
       }
-      return [line, currentTokenIdx];
+      return [li, currentTokenIdx];
     }
-    return null;
+    return [-1, -1];
   }
 
   private calculateTokenWidths(line: LyricLine): number[] {

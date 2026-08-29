@@ -15,6 +15,10 @@ export class PitchCanvas {
   private viewMinMidi: number = 40;
   private viewMaxMidi: number = 80;
 
+  // 静态内容 (钢琴卷帘 + 音高曲线) 的离屏缓存:
+  // 音高数据可达数万帧, 每帧重画会掉帧, 只在 setTrack/resize/setAudioData 时重画
+  private staticCache: HTMLCanvasElement | null = null;
+
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     const ctx = canvas.getContext("2d");
@@ -28,16 +32,19 @@ export class PitchCanvas {
     this.canvas.width = rect.width * dpr;
     this.canvas.height = rect.height * dpr;
     this.ctx.scale(dpr, dpr);
+    this.staticCache = null;
   }
 
   setTrack(track: PitchTrack) {
     this.track = track;
     this.autoFitView();
+    this.staticCache = null;
   }
 
   setAudioData(data: Float32Array, sampleRate: number) {
     this.audioData = data;
     this.audioSampleRate = sampleRate;
+    this.staticCache = null;
   }
 
   setTime(time: number) {
@@ -75,19 +82,37 @@ export class PitchCanvas {
     const topH = h * 0.12;
     const mainH = h - topH;
 
+    this.ensureStaticCache(w, h, topH, mainH);
+
     ctx.clearRect(0, 0, w, h);
+    if (this.staticCache) {
+      ctx.drawImage(this.staticCache, 0, 0, w, h);
+    }
+    this.drawPlayCursor({ x: 0, y: 0, w, h }, this.currentTime);
+  }
+
+  /// 静态层离屏渲染 (设备像素分辨率, 与主画布 dpr 一致)
+  private ensureStaticCache(w: number, h: number, topH: number, mainH: number) {
+    if (this.staticCache) return;
+    const dpr = window.devicePixelRatio || 1;
+    const cache = document.createElement("canvas");
+    cache.width = Math.max(1, Math.round(w * dpr));
+    cache.height = Math.max(1, Math.round(h * dpr));
+    const cctx = cache.getContext("2d");
+    if (!cctx) return;
+    cctx.scale(dpr, dpr);
 
     const audioRect = { x: 0, y: 0, w, h: topH };
     const mainRect = { x: 0, y: topH, w, h: mainH };
 
-    this.drawAudioWaveform(audioRect);
-    this.drawPianoRollBackground(mainRect);
-    this.drawPitchTrack(mainRect);
-    this.drawPlayCursor({ x: 0, y: 0, w, h }, this.currentTime);
+    this.drawAudioWaveformInto(cctx, audioRect);
+    this.drawPianoRollBackgroundInto(cctx, mainRect);
+    this.drawPitchTrackInto(cctx, mainRect);
+
+    this.staticCache = cache;
   }
 
-  private drawAudioWaveform(rect: { x: number; y: number; w: number; h: number }) {
-    const ctx = this.ctx;
+  private drawAudioWaveformInto(ctx: CanvasRenderingContext2D, rect: { x: number; y: number; w: number; h: number }) {
     const { x, y, w, h } = rect;
 
     ctx.fillStyle = "#1e1e1e";
@@ -123,16 +148,15 @@ export class PitchCanvas {
     ctx.stroke();
   }
 
-  private drawPianoRollBackground(rect: { x: number; y: number; w: number; h: number }) {
-    const ctx = this.ctx;
+  private drawPianoRollBackgroundInto(ctx: CanvasRenderingContext2D, rect: { x: number; y: number; w: number; h: number }) {
     const { x, y, w, h } = rect;
 
     const midiStart = Math.floor(this.viewMinMidi);
     const midiEnd = Math.ceil(this.viewMaxMidi);
-    const nNotes = midiEnd - midiStart;
+    const nNotes = Math.max(1, midiEnd - midiStart);
 
     for (let m = midiStart; m <= midiEnd; m++) {
-      const noteIdx = m % 12;
+      const noteIdx = ((m % 12) + 12) % 12;
       const noteY = y + h * (1 - (m - this.viewMinMidi) / nNotes);
       const noteH = h / nNotes;
 
@@ -158,21 +182,21 @@ export class PitchCanvas {
     ctx.fillStyle = "#707070";
     ctx.font = "12px 'Segoe UI', sans-serif";
     for (let m = midiStart; m <= midiEnd; m += 1) {
-      if (m % 12 !== 0 && m % 12 !== 3 && m % 12 !== 7) continue;
-      const noteIdx = m % 12;
+      const noteIdx = ((m % 12) + 12) % 12;
+      if (noteIdx !== 0 && noteIdx !== 3 && noteIdx !== 7) continue;
       const oct = Math.floor(m / 12) - 1;
       const noteY = y + h * (1 - (m - this.viewMinMidi) / nNotes);
       ctx.fillText(`${NOTE_NAMES[noteIdx]}${oct}`, x + 45, noteY - h / nNotes / 2);
     }
   }
 
-  private drawPitchTrack(rect: { x: number; y: number; w: number; h: number }) {
-    const ctx = this.ctx;
+  private drawPitchTrackInto(ctx: CanvasRenderingContext2D, rect: { x: number; y: number; w: number; h: number }) {
     const { x, y, w, h } = rect;
     if (!this.track || this.track.times.length === 0) return;
 
     const duration = this.track.times[this.track.times.length - 1];
-    const midiRange = this.viewMaxMidi - this.viewMinMidi;
+    if (!isFinite(duration) || duration <= 0) return;
+    const midiRange = Math.max(1, this.viewMaxMidi - this.viewMinMidi);
 
     // First pass: draw the connecting lines
     ctx.strokeStyle = "rgba(0, 212, 170, 0.9)";
@@ -207,9 +231,10 @@ export class PitchCanvas {
       ctx.stroke();
     }
 
-    // Second pass: draw the circular points
+    // Second pass: draw the circular points, 密集时抽样 (每像素列最多 ~2 个点)
+    const dotStep = Math.max(1, Math.floor(this.track.times.length / (w * 2)));
     ctx.fillStyle = "rgba(0, 212, 170, 0.4)";
-    for (let i = 0; i < this.track.times.length; i++) {
+    for (let i = 0; i < this.track.times.length; i += dotStep) {
       const t = this.track.times[i];
       const m = this.track.midis[i];
       if (!isFinite(m)) continue;
@@ -224,8 +249,9 @@ export class PitchCanvas {
 
   private drawPlayCursor(rect: { x: number; y: number; w: number; h: number }, time: number) {
     const ctx = this.ctx;
-    if (!this.track) return;
+    if (!this.track || this.track.times.length === 0) return;
     const duration = this.track.times[this.track.times.length - 1];
+    if (!isFinite(duration) || duration <= 0) return;
     const px = (time / duration) * rect.w;
 
     ctx.strokeStyle = "#ff5252";

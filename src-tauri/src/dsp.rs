@@ -33,7 +33,9 @@ pub fn midi_to_f0(midi: &[f32]) -> Vec<f32> {
 pub fn post_process(
     f0: &[f32],
     conf: &[f32],
+    rms: &[f32],
     confidence_threshold: f32,
+    rms_threshold: f32,
     fmin: f32,
     fmax: f32,
     median_window: usize,
@@ -49,8 +51,8 @@ pub fn post_process(
     // 2. 转 MIDI
     let mut midi = f0_to_midi(&f0);
 
-    // 3. stabilize: confidence mask + remove_short_islands + hampel
-    midi = stabilize_vocal_midi(&midi, conf, confidence_threshold);
+    // 3. stabilize: confidence & rms mask + remove_short_islands + hampel
+    midi = stabilize_vocal_midi(&midi, conf, rms, confidence_threshold, rms_threshold);
 
     // 4. median filter (per segment)
     if median_window > 1 {
@@ -90,17 +92,33 @@ pub fn post_process(
     (times, final_freqs, midi)
 }
 
-fn stabilize_vocal_midi(midi: &[f32], conf: &[f32], threshold: f32) -> Vec<f32> {
+fn stabilize_vocal_midi(midi: &[f32], conf: &[f32], rms: &[f32], conf_threshold: f32, rms_threshold: f32) -> Vec<f32> {
     let mut out = midi.to_vec();
-    // confidence mask
+    // confidence & rms mask
     for i in 0..out.len() {
-        if !out[i].is_nan() && i < conf.len() && conf[i] < threshold {
+        let low_conf = i < conf.len() && conf[i] < conf_threshold;
+        let low_rms = i < rms.len() && rms[i] < rms_threshold;
+        if !out[i].is_nan() && (low_conf || low_rms) {
             out[i] = f32::NAN;
         }
     }
-    out = remove_short_pitch_islands(&out, conf, 1.25, 5);
+    // 孤立短 voiced 段: 静音/换气间隙里 1-2 帧的发声毛刺 (置信度略过阈值即可产生),
+    // median/hampel 对孤岛无能为力 (nanmedian 有值就返回), 必须整段丢弃
+    drop_short_voiced_segments(&mut out, MIN_VOICED_SEGMENT_FRAMES);
+    out = remove_short_pitch_islands(&out, conf, ISLAND_JUMP_SEMITONES, ISLAND_MIN_FRAMES);
     out = apply_hampel_midi(&out, 13, 0.9);
     out
+}
+
+/// 把长度不足 min_seg_frames 的孤立 voiced 段整体置为 unvoiced
+fn drop_short_voiced_segments(midi: &mut [f32], min_seg_frames: usize) {
+    for (s, e) in iter_voiced_segments(midi) {
+        if e - s + 1 < min_seg_frames {
+            for v in &mut midi[s..=e] {
+                *v = f32::NAN;
+            }
+        }
+    }
 }
 
 /// 找到所有有 voiced (非 NaN) 的连续段
@@ -120,6 +138,16 @@ fn iter_voiced_segments(midi: &[f32]) -> Vec<(usize, usize)> {
     }
     segs
 }
+
+// 短音符清理阈值 (集中管理, 10ms/帧)
+/// run 间跳变判定 (半音): 超过则视为不同 run
+const ISLAND_JUMP_SEMITONES: f32 = 1.25;
+/// 非 run 边界的最短有效音符帧数 (50ms)
+const ISLAND_MIN_FRAMES: usize = 5;
+/// 孤立 voiced 段的最短帧数 (30ms): 更短的孤岛视为发声毛刺整段丢弃
+const MIN_VOICED_SEGMENT_FRAMES: usize = 3;
+/// 边界泛音误差 (八度/十二度/双八度) 允许的最长修正帧数 (150ms)
+const ISLAND_HARMONIC_MAX_FRAMES: usize = 15;
 
 fn remove_short_pitch_islands(
     midi: &[f32],
@@ -146,9 +174,7 @@ fn remove_short_pitch_islands(
 
         for ri in 0..runs.len() {
             let (rs, re) = runs[ri];
-            if re - rs + 1 >= min_frames {
-                continue;
-            }
+            let run_len = re - rs + 1;
 
             // 首尾 run: "短暂异常 + 相邻稳定主音" 判断。
             // 不要简单删除首尾保护：只有很短、与主音差距大且置信度低(或恰为八度错误)才修正为相邻稳定音。
@@ -173,12 +199,29 @@ fn remove_short_pitch_islands(
                 }
                 let cur_conf = nanmean(&conf[rs..=re.min(conf.len() - 1)]);
                 let nbr_conf = nanmean(&conf[nbr_s..=nbr_e.min(conf.len() - 1)]);
-                let is_octave = (diff - 12.0).abs() <= 1.5;
-                if is_octave || cur_conf < nbr_conf {
-                    for j in rs..=re {
-                        out[j] = nbr_med;
+                
+                // 常见泛音误差: 八度(12), 十二度(19), 两个八度(24), 甚至更高
+                let is_harmonic = (diff - 12.0).abs() <= 1.5 
+                    || (diff - 19.0).abs() <= 1.5 
+                    || (diff - 24.0).abs() <= 1.5 
+                    || (diff - 28.0).abs() <= 1.5;
+                
+                // 如果是边界，对于泛音误差我们容忍更长的帧数（比如最多 15 帧 / 150ms）
+                // 对于一般的置信度低的杂音，容忍 min_frames
+                let allowed_len = if is_harmonic { ISLAND_HARMONIC_MAX_FRAMES } else { min_frames };
+                
+                if run_len < allowed_len {
+                    if is_harmonic || cur_conf < nbr_conf {
+                        for j in rs..=re {
+                            out[j] = nbr_med;
+                        }
                     }
                 }
+                continue;
+            }
+
+            // 非首尾 run: 需要满足短时长
+            if run_len >= min_frames {
                 continue;
             }
 
@@ -257,7 +300,9 @@ fn apply_savgol_midi(midi: &[f32], window: usize) -> Vec<f32> {
         }
         let seg = &midi[seg_start..=seg_end];
         let filtered = savgol_filter(seg, window, 3);
-        for i in 0..seg_len {
+        // 只写回完整窗口覆盖的帧: 边缘半窗内样本不足, 拟合偏差大, 保留原值
+        let half = window / 2;
+        for i in half..seg_len - half {
             out[seg_start + i] = filtered[i];
         }
     }
@@ -469,5 +514,25 @@ mod tests {
         let out = remove_short_pitch_islands(&midis, &conf, 1.25, 5);
         // 由于 diff <= jump_threshold，两个 run 其实是同一段，原样保留
         assert!(!out[0].is_nan());
+    }
+
+    /// 静音间隙里的孤立发声毛刺 (1-2 帧) → 整段丢弃为 unvoiced
+    #[test]
+    fn test_isolated_voiced_blip_dropped() {
+        let mut midis = vec![f32::NAN; 30];
+        midis[10] = 84.0;
+        midis[11] = 84.3;
+        let conf = conf_vec(30, 0.9);
+        let rms = conf_vec(30, 0.1);
+        let out = stabilize_vocal_midi(&midis, &conf, &rms, 0.3, 0.005);
+        assert!(out[10].is_nan() && out[11].is_nan(), "isolated blip must be dropped: {:?}", &out[8..14]);
+
+        // 连续正常发声段不受影响
+        let mut midis2 = vec![f32::NAN; 10];
+        midis2.extend(vec![60.0, 60.1, 60.2]);
+        midis2.extend(vec![f32::NAN; 10]);
+        let out2 = stabilize_vocal_midi(&midis2, &conf_vec(23, 0.9), &conf_vec(23, 0.1), 0.3, 0.005);
+        // 3 帧段恰好在阈值上, 保留
+        assert!(!out2[10].is_nan() && !out2[12].is_nan(), "3-frame segment must be kept");
     }
 }

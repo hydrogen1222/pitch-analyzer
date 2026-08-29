@@ -3,7 +3,7 @@ import { open, save, message, ask } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { PitchCanvas } from "./pitch_canvas";
 import { KaraokeDisplay } from "./karaoke_display";
-import { PRESETS, type PitchTrack, type AnalysisParams } from "./types";
+import { type PitchTrack, type AnalysisParams } from "./types";
 import type { LyricLine } from "./models_lyrics";
 
 // 检查是否在 Tauri 环境中运行
@@ -25,16 +25,6 @@ let progressSlider: HTMLInputElement | null;
 let volumeSlider: HTMLInputElement | null;
 let timeDisplay: HTMLElement | null;
 let statusEl: HTMLElement | null;
-let presetBtns: NodeListOf<HTMLButtonElement> | null;
-let presetDescEl: HTMLElement | null;
-let confidenceInput: HTMLInputElement | null;
-let fminInput: HTMLInputElement | null;
-let fmaxInput: HTMLInputElement | null;
-let quantizeInput: HTMLInputElement | null;
-let medianInput: HTMLInputElement | null;
-let smoothingInput: HTMLInputElement | null;
-let advancedToggleBtn: HTMLButtonElement | null;
-let advancedContentEl: HTMLElement | null;
 let importAudioBtn: HTMLButtonElement | null;
 let importLrcBtn: HTMLButtonElement | null;
 let importTxtBtn: HTMLButtonElement | null;
@@ -43,7 +33,6 @@ let saveProjBtn: HTMLButtonElement | null;
 let loadProjBtn: HTMLButtonElement | null;
 let exportSrtBtn: HTMLButtonElement | null;
 let exportAssBtn: HTMLButtonElement | null;
-let minNoteDurInput: HTMLInputElement | null;
 let pitchFontInput: HTMLInputElement | null;
 let lyricFontInput: HTMLInputElement | null;
 let selectModelBtn: HTMLButtonElement | null;
@@ -61,29 +50,17 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-function applyPreset(name: string) {
-  const preset = PRESETS[name];
-  if (!preset) return;
-  presetBtns?.forEach((btn) => btn.classList.toggle("active", btn.dataset.preset === name));
-  if (confidenceInput) confidenceInput.value = String(preset.params.confidence_threshold);
-  if (fminInput) fminInput.value = String(preset.params.fmin);
-  if (fmaxInput) fmaxInput.value = String(preset.params.fmax);
-  if (quantizeInput) quantizeInput.checked = preset.params.quantize;
-  if (medianInput) medianInput.value = String(preset.params.median_smoothing);
-  if (smoothingInput) smoothingInput.value = String(preset.params.smoothing);
-  if (minNoteDurInput) minNoteDurInput.value = String(preset.params.min_note_duration_ms);
-  if (presetDescEl) presetDescEl.textContent = preset.description;
-}
+
 
 function getCurrentParams(): AnalysisParams {
   return {
-    confidence_threshold: parseFloat(confidenceInput?.value || "0.3"),
-    fmin: parseFloat(fminInput?.value || "65"),
-    fmax: parseFloat(fmaxInput?.value || "1300"),
-    smoothing: parseFloat(smoothingInput?.value || "15"),
-    median_smoothing: parseFloat(medianInput?.value || "11"),
-    quantize: quantizeInput?.checked || false,
-    min_note_duration_ms: parseFloat(minNoteDurInput?.value || "45"),
+    confidence_threshold: 0.3,
+    fmin: 65,
+    fmax: 1300,
+    smoothing: 15,
+    median_smoothing: 11,
+    quantize: false,
+    min_note_duration_ms: 45,
   };
 }
 
@@ -111,14 +88,48 @@ function updateTimeDisplay() {
   }
 }
 
+/// 当前位置的平滑音高读数:
+/// - ±2 帧 (50ms) 窗口内取中值 → 吸收单帧错误与边缘半音抖动
+/// - 最近有限帧距离 > 2 帧视为真正的无声间隙 → 显示 ---
+function smoothedMidiAt(track: PitchTrack, t: number): number | null {
+  const { times, midis } = track;
+  let lo = 0;
+  let hi = times.length - 1;
+  let idx = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] <= t) {
+      idx = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  const at = (k: number) => {
+    const m = midis[k];
+    return m !== undefined && isFinite(m) ? m : null;
+  };
+  if (at(idx) === null) {
+    let nearest = Infinity;
+    for (let k = Math.max(0, idx - 3); k <= Math.min(times.length - 1, idx + 3); k++) {
+      if (at(k) !== null) nearest = Math.min(nearest, Math.abs(k - idx));
+    }
+    if (nearest > 2) return null;
+  }
+  const vals: number[] = [];
+  for (let k = Math.max(0, idx - 2); k <= Math.min(times.length - 1, idx + 2); k++) {
+    const v = at(k);
+    if (v !== null) vals.push(v);
+  }
+  if (vals.length === 0) return null;
+  vals.sort((a, b) => a - b);
+  return vals[Math.floor(vals.length / 2)];
+}
+
 function updateCurrentPitch() {
   if (!state.track || !karaokeDisplay) return;
-  const { times, midis } = state.track;
-  let idx = times.findIndex((t) => t > state.currentTime);
-  if (idx < 0) idx = times.length - 1;
-  if (idx > 0) idx--;
-  const midi = midis[idx];
-  karaokeDisplay.setCurrentMidi(isFinite(midi) ? midi : null);
+  const midi = smoothedMidiAt(state.track, state.currentTime);
+  karaokeDisplay.setCurrentMidi(midi);
   if (pitchCanvas) pitchCanvas.setTime(state.currentTime);
 }
 
@@ -190,7 +201,7 @@ async function doImportAudio() {
     const params = getCurrentParams();
     const track = (await invoke("analyze_audio", { audioPath: selected, params })) as PitchTrack;
     state.track = track;
-    state.duration = track.times[track.times.length - 1];
+    state.duration = (track.times && track.times.length > 0) ? track.times[track.times.length - 1] : 0;
     state.currentTime = 0;
     if (pitchCanvas) { pitchCanvas.setTrack(track); pitchCanvas.setTime(0); }
     enableControls(true);
@@ -221,7 +232,7 @@ async function doImportLrc() {
     const lines = (await invoke("load_lyrics_lrc", { path: selected })) as LyricLine[];
     state.lyrics = lines;
     if (karaokeDisplay) karaokeDisplay.setLyrics(lines);
-    if (clearLyricsBtn) clearLyricsBtn.disabled = false;
+    if (clearLyricsBtn) clearLyricsBtn.disabled = lines.length === 0;
     setStatus(`已加载 ${lines.length} 行歌词`);
   } catch (e) {
     console.error("Import LRC failed:", e);
@@ -244,7 +255,7 @@ async function doImportTxt() {
     const lines = (await invoke("load_lyrics_txt", { path: selected })) as LyricLine[];
     state.lyrics = lines;
     if (karaokeDisplay) karaokeDisplay.setLyrics(lines);
-    if (clearLyricsBtn) clearLyricsBtn.disabled = false;
+    if (clearLyricsBtn) clearLyricsBtn.disabled = lines.length === 0;
     setStatus(`已加载 ${lines.length} 行歌词`);
   } catch (e) {
     console.error("Import TXT failed:", e);
@@ -283,27 +294,15 @@ async function doLoadProject() {
     const data = await invoke("load_project", { path: selected }) as { audio_path?: string; pitch_track?: PitchTrack; lyrics?: LyricLine[]; analysis_params?: AnalysisParams };
     if (data.pitch_track) {
       state.track = data.pitch_track;
-      state.duration = data.pitch_track.times[data.pitch_track.times.length - 1];
+      state.duration = (data.pitch_track.times && data.pitch_track.times.length > 0) ? data.pitch_track.times[data.pitch_track.times.length - 1] : 0;
       state.currentTime = 0;
       if (pitchCanvas) { pitchCanvas.setTrack(data.pitch_track); pitchCanvas.setTime(0); }
       enableControls(true);
     }
-    if (data.lyrics && data.lyrics.length > 0) {
-      state.lyrics = data.lyrics;
-      if (karaokeDisplay) karaokeDisplay.setLyrics(data.lyrics);
-      if (clearLyricsBtn) clearLyricsBtn.disabled = false;
-    }
-    // 恢复分析参数到界面，保证后续导出/重新分析与工程一致
-    if (data.analysis_params) {
-      const p = data.analysis_params;
-      if (confidenceInput) confidenceInput.value = String(p.confidence_threshold);
-      if (fminInput) fminInput.value = String(p.fmin);
-      if (fmaxInput) fmaxInput.value = String(p.fmax);
-      if (quantizeInput) quantizeInput.checked = p.quantize;
-      if (medianInput) medianInput.value = String(p.median_smoothing);
-      if (smoothingInput) smoothingInput.value = String(p.smoothing);
-      if (minNoteDurInput) minNoteDurInput.value = String(p.min_note_duration_ms);
-    }
+    state.lyrics = data.lyrics || [];
+    if (karaokeDisplay) karaokeDisplay.setLyrics(state.lyrics);
+    if (clearLyricsBtn) clearLyricsBtn.disabled = state.lyrics.length === 0;
+    // 恢复分析参数的逻辑已被移除，因为这些参数已经作为系统最佳默认值硬编码
     setStatus("项目已加载");
   } catch (e) {
     console.error("Load project failed:", e);
@@ -335,7 +334,10 @@ async function doExportAss() {
     });
     if (!selected) return;
 
-    await invoke("export_ass", { path: selected });
+    // 音高/歌词基础字号取自底部控制栏, 与卡拉OK预览保持一致
+    const pitchFontSize = parseInt(pitchFontInput?.value || "48");
+    const lyricFontSize = parseInt(lyricFontInput?.value || "18");
+    await invoke("export_ass", { path: selected, pitchFontSize, lyricFontSize });
     setStatus("ASS 已导出 (可直接用 ffmpeg/libass 烧录)");
   } catch (e) {
     console.error("Export ASS failed:", e);
@@ -387,16 +389,6 @@ async function initApp() {
   volumeSlider = document.querySelector("#volume-slider");
   timeDisplay = document.querySelector("#time-display");
   statusEl = document.querySelector("#status");
-  presetBtns = document.querySelectorAll(".preset-btn");
-  presetDescEl = document.querySelector("#preset-desc");
-  confidenceInput = document.querySelector("#confidence");
-  fminInput = document.querySelector("#fmin");
-  fmaxInput = document.querySelector("#fmax");
-  quantizeInput = document.querySelector("#quantize");
-  medianInput = document.querySelector("#median");
-  smoothingInput = document.querySelector("#smoothing");
-  advancedToggleBtn = document.querySelector("#advanced-toggle");
-  advancedContentEl = document.querySelector("#advanced-content");
   importAudioBtn = document.querySelector("#import-audio");
   importLrcBtn = document.querySelector("#import-lrc");
   importTxtBtn = document.querySelector("#import-txt");
@@ -405,7 +397,6 @@ async function initApp() {
   loadProjBtn = document.querySelector("#load-proj");
   exportSrtBtn = document.querySelector("#export-srt");
   exportAssBtn = document.querySelector("#export-ass");
-  minNoteDurInput = document.querySelector("#min-note-duration");
   pitchFontInput = document.querySelector("#font-pitch");
   lyricFontInput = document.querySelector("#font-lyric");
   selectModelBtn = document.querySelector("#select-model");
@@ -417,18 +408,8 @@ async function initApp() {
   if (karaokeDisplayEl && karaokeHeaderEl) {
     karaokeDisplay = new KaraokeDisplay(karaokeDisplayEl, karaokeHeaderEl, karaokeDisplayEl);
   }
-  applyPreset("pop");
-
   // Events
   window.addEventListener("resize", () => { if (pitchCanvas) pitchCanvas.resize(); });
-  presetBtns?.forEach((btn) => btn.addEventListener("click", () => { const n = btn.dataset.preset; if (n) applyPreset(n); }));
-  advancedToggleBtn?.addEventListener("click", () => {
-    if (advancedContentEl) {
-      const vis = advancedContentEl.style.display !== "none";
-      advancedContentEl.style.display = vis ? "none" : "block";
-      if (advancedToggleBtn) advancedToggleBtn.textContent = vis ? "展开" : "收起";
-    }
-  });
 
   importAudioBtn?.addEventListener("click", doImportAudio);
   importLrcBtn?.addEventListener("click", doImportLrc);

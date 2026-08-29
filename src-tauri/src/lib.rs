@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::Manager;
 
-mod analyzer;
+pub mod analyzer;
 pub mod audio;
 pub mod decoder;
 pub mod dsp;
@@ -56,68 +56,89 @@ pub fn try_init_ort_dylib() {
         return;
     }
 
-    let find_in_dir = |dir_path: &str| -> Option<PathBuf> {
-        let path = Path::new(dir_path);
-        if !path.is_dir() {
-            return None;
-        }
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if let Some(file_name) = p.file_name().and_then(|n| n.to_str()) {
-                    if file_name.starts_with("libonnxruntime.so") {
-                        return Some(p);
-                    }
-                }
-            }
-        }
-        None
+    // 0. 显式路径优先: 仓库/打包产物的 resources 目录 (避免 PATH 上的旧版 DLL)
+    let dylib_name = if cfg!(target_os = "windows") {
+        "onnxruntime.dll"
+    } else if cfg!(target_os = "macos") {
+        "libonnxruntime.dylib"
+    } else {
+        "libonnxruntime.so"
     };
-
-    // 1. Check direct system library candidates
-    let direct_candidates = [
-        "/usr/lib",
-        "/usr/local/lib",
-        "/usr/lib64",
-        "/opt",
-    ];
-    for dir in direct_candidates {
-        if let Some(p) = find_in_dir(dir) {
+    let mut explicit: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            explicit.push(dir.join("resources").join(dylib_name));
+            explicit.push(dir.join(dylib_name));
+        }
+    }
+    // 编译期路径: cargo test / dev 运行时定位 src-tauri/resources
+    explicit.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join(dylib_name));
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        explicit.push(PathBuf::from(&manifest_dir).join("resources").join(dylib_name));
+    }
+    for p in explicit {
+        if p.exists() {
             std::env::set_var("ORT_DYLIB_PATH", &p);
             eprintln!("ORT_DYLIB_PATH = {}", p.display());
             return;
         }
     }
 
-    // 2. Check Python environments (local user, virtual envs, etc.)
-    let mut search_dirs = Vec::new();
+    // 1. Linux: 系统目录与 Python 环境中搜寻 libonnxruntime.so
+    if cfg!(target_os = "linux") {
+        let find_in_dir = |dir_path: &str| -> Option<PathBuf> {
+            let path = Path::new(dir_path);
+            if !path.is_dir() {
+                return None;
+            }
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if let Some(file_name) = p.file_name().and_then(|n| n.to_str()) {
+                        if file_name.starts_with("libonnxruntime.so") {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+            None
+        };
 
-    if let Ok(home) = std::env::var("HOME") {
-        search_dirs.push(format!("{}/.local/lib", home));
-    }
-    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
-        search_dirs.push(format!("{}/lib", venv));
-    }
-    // Relative paths for development/testing
-    search_dirs.push("../pitch/.venv/lib".to_string());
-    search_dirs.push("../../pitch/.venv/lib".to_string());
-    search_dirs.push("./.venv/lib".to_string());
-    search_dirs.push("../.venv/lib".to_string());
-
-    let py_versions = ["python3.13", "python3.12", "python3.11", "python3.10", "python3.9", "python3.8"];
-
-    for base_dir in search_dirs {
-        for py_ver in &py_versions {
-            let capi_path = format!("{}/{}/site-packages/onnxruntime/capi", base_dir, py_ver);
-            if let Some(p) = find_in_dir(&capi_path) {
+        let direct_candidates = ["/usr/lib", "/usr/local/lib", "/usr/lib64", "/opt"];
+        for dir in direct_candidates {
+            if let Some(p) = find_in_dir(dir) {
                 std::env::set_var("ORT_DYLIB_PATH", &p);
                 eprintln!("ORT_DYLIB_PATH = {}", p.display());
                 return;
             }
         }
+
+        let mut search_dirs = Vec::new();
+        if let Ok(home) = std::env::var("HOME") {
+            search_dirs.push(format!("{}/.local/lib", home));
+        }
+        if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+            search_dirs.push(format!("{}/lib", venv));
+        }
+        search_dirs.push("../pitch/.venv/lib".to_string());
+        search_dirs.push("../../pitch/.venv/lib".to_string());
+        search_dirs.push("./.venv/lib".to_string());
+        search_dirs.push("../.venv/lib".to_string());
+
+        let py_versions = ["python3.13", "python3.12", "python3.11", "python3.10", "python3.9", "python3.8"];
+        for base_dir in search_dirs {
+            for py_ver in &py_versions {
+                let capi_path = format!("{}/{}/site-packages/onnxruntime/capi", base_dir, py_ver);
+                if let Some(p) = find_in_dir(&capi_path) {
+                    std::env::set_var("ORT_DYLIB_PATH", &p);
+                    eprintln!("ORT_DYLIB_PATH = {}", p.display());
+                    return;
+                }
+            }
+        }
     }
 
-    eprintln!("Warning: 未找到 libonnxruntime, 请设置 ORT_DYLIB_PATH");
+    eprintln!("Warning: 未找到 onnxruntime 运行库, 请设置 ORT_DYLIB_PATH");
 }
 
 pub fn init_bundled_ort_dylib(app_handle: &tauri::AppHandle) {
@@ -281,7 +302,8 @@ async fn analyze_audio(
         }).map_err(|e| format!("分析失败: {}", e))?
     };
 
-    // 加载到播放器
+    // 确保播放器可用并加载音频
+    ensure_player(&app_state);
     if let Some(player) = app_state.player.lock().unwrap().as_ref() {
         let _ = player.load(&audio_path);
     }
@@ -291,6 +313,14 @@ async fn analyze_audio(
     // 重新绑定 pitch 到歌词
     let t = track.clone();
     *app_state.track.lock().unwrap() = Some(track);
+    // 音轨更新后, 自动估计过逐字时间的歌词需要重新对齐 (enhanced LRC 的时间保留)
+    {
+        let mut lyrics_guard = app_state.lyrics.lock().unwrap();
+        if lyrics_guard.iter().any(|l| l.token_timing_auto) {
+            let align_params = crate::lyrics::TokenAlignParams::default();
+            crate::lyrics::align_token_times(&mut lyrics_guard, &t, &align_params);
+        }
+    }
     rebind_lyrics(&app_state);
     Ok(t)
 }
@@ -428,6 +458,7 @@ fn load_project(app_state: tauri::State<AppState>, path: String) -> Result<Proje
     // 恢复播放器 (音频文件存在时)
     if let Some(audio) = &data.audio_path {
         if Path::new(audio).exists() {
+            ensure_player(&app_state);
             if let Some(player) = app_state.player.lock().unwrap().as_ref() {
                 let _ = player.load(audio);
             }
@@ -435,6 +466,15 @@ fn load_project(app_state: tauri::State<AppState>, path: String) -> Result<Proje
     }
 
     Ok(data)
+}
+
+fn ensure_player(app_state: &AppState) {
+    let mut guard = app_state.player.lock().unwrap();
+    if guard.is_none() {
+        if let Ok(player) = AudioPlayer::new() {
+            *guard = Some(player);
+        }
+    }
 }
 
 #[tauri::command]
@@ -446,12 +486,19 @@ fn export_srt(app_state: tauri::State<AppState>, path: String) -> Result<(), Str
 }
 
 #[tauri::command]
-fn export_ass(app_state: tauri::State<AppState>, path: String) -> Result<(), String> {
+fn export_ass(
+    app_state: tauri::State<AppState>,
+    path: String,
+    pitch_font_size: Option<u32>,
+    lyric_font_size: Option<u32>,
+) -> Result<(), String> {
     if app_state.track.lock().unwrap().is_none() {
         return Err("没有分析数据，请先分析音频".to_string());
     }
     let lyrics = app_state.lyrics.lock().unwrap();
-    crate::export::ass::export_ass(&lyrics, Path::new(&path), 40, 28)
+    let pitch_size = pitch_font_size.unwrap_or(40).clamp(14, 120);
+    let lyric_size = lyric_font_size.unwrap_or(28).clamp(12, 72);
+    crate::export::ass::export_ass(&lyrics, Path::new(&path), pitch_size, lyric_size)
 }
 
 #[tauri::command]

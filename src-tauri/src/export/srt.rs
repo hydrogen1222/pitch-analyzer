@@ -11,10 +11,12 @@ pub fn export_srt(
     path: &Path,
 ) -> Result<(), String> {
     let to_srt_time = |sec: f32| -> String {
-        let hrs = (sec / 3600.0) as u32;
-        let mins = ((sec % 3600.0) / 60.0) as u32;
-        let secs = (sec % 60.0) as u32;
-        let ms = ((sec % 1.0) * 1000.0) as u32;
+        // 四舍五入到毫秒, 避免截断误差累积; 总毫秒数统一进位防止 999.9ms 溢出
+        let total_ms = (sec.max(0.0) * 1000.0).round() as u64;
+        let hrs = total_ms / 3_600_000;
+        let mins = (total_ms % 3_600_000) / 60_000;
+        let secs = (total_ms % 60_000) / 1000;
+        let ms = total_ms % 1000;
         format!("{:02}:{:02}:{:02},{:03}", hrs, mins, secs, ms)
     };
 
@@ -22,12 +24,14 @@ pub fn export_srt(
     let mut idx = 1u32;
 
     if !lyrics.is_empty() {
+        let mut timed_tokens = 0usize;
         for line in lyrics {
             for token in &line.tokens {
                 let (t_start, t_end) = match (token.start_time, token.end_time) {
                     (Some(s), Some(e)) => (s, e),
                     _ => continue,
                 };
+                timed_tokens += 1;
                 let text = if token.text.contains('|') {
                     token.text.split('|').next().unwrap_or(&token.text)
                 } else {
@@ -47,13 +51,19 @@ pub fn export_srt(
                 idx += 1;
             }
         }
-    } else {
+        if timed_tokens == 0 {
+            return Err(
+                "歌词没有逐字时间信息 (TXT 歌词需要在导入音频后使用 LRC 才能对齐时间)，无法导出 SRT"
+                    .to_string(),
+            );
+        }
+    } else if let Some(&max_time) = pitch_track.times.last() {
         let interval = 0.5f32;
         let mut t = 0.0f32;
-        while t < pitch_track.times[pitch_track.times.len() - 1] {
+        while t < max_time {
             let i = match pitch_track.times.binary_search_by(|probe| probe.partial_cmp(&t).unwrap()) {
                 Ok(i) => i,
-                Err(i) => i.min(pitch_track.midis.len() - 1),
+                Err(i) => i.min(pitch_track.midis.len().saturating_sub(1)),
             };
             let midi = pitch_track.midis[i];
             let mut display = midi_to_note_name(midi);

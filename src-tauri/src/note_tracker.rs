@@ -63,19 +63,16 @@ impl RawRun {
 }
 
 fn infer_hop_seconds(times: &[f32]) -> f32 {
+    // times 为 f32 累积值, 长音频下相邻差的量化噪声可达 ~3e-5 (在 240s 处 f32 间隔),
+    // 中位数会被污染导致帧数换算翻车。均匀网格下用首尾端点在 f64 下求平均, 误差 ~1e-9。
     if times.len() < 2 {
         return 0.01;
     }
-    let mut diffs: Vec<f32> = times
-        .windows(2)
-        .map(|w| w[1] - w[0])
-        .filter(|&d| d > 0.0)
-        .collect();
-    if diffs.is_empty() {
+    let span = (times[times.len() - 1] as f64) - (times[0] as f64);
+    if span <= 0.0 {
         return 0.01;
     }
-    diffs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    diffs[diffs.len() / 2]
+    (span / (times.len() - 1) as f64).max(1e-3) as f32
 }
 
 /// 从 clean pitch track 构建 NoteEvent 列表
@@ -90,7 +87,11 @@ pub fn build_note_events(
     }
     let n = times.len().min(midis.len()).min(confidences.len());
     let hop = infer_hop_seconds(times).max(1e-3);
-    let to_frames = |ms: f32| ((ms / 1000.0 / hop).round() as usize).max(1);
+    // ms → 帧数。用 f64 + 小容差: times 为 f32 累积值, hop 的中位数带 ~1e-7 相对误差,
+    // 恰好落在 .5 边界 (如 45ms/10ms hop = 4.5) 时 round 会翻到错误的帧数
+    let to_frames = |ms: f32| {
+        (((ms as f64) / 1000.0 / (hop as f64)) + 1e-4).round().max(1.0) as usize
+    };
     let min_frames = to_frames(params.min_note_duration_ms);
     let switch_frames = to_frames(params.switch_confirm_ms);
     let octave_frames = to_frames(params.octave_error_max_ms);
@@ -172,8 +173,7 @@ pub fn build_note_events(
     }
 
     // ── Step 4: 最短时长过滤 ──
-    {
-        let mut i = 0usize;
+    {        let mut i = 0usize;
         while i < merged.len() {
             if merged[i].len() < min_frames {
                 drop_run_merge(&mut merged, i);

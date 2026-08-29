@@ -1,7 +1,6 @@
 use pitch_analyzer_tauri_lib::export::srt::export_srt;
 use pitch_analyzer_tauri_lib::lyrics::{bind_pitch_to_tokens, distribute_token_times, parse_lrc};
 use pitch_analyzer_tauri_lib::models::{NoteTrackingParams, PitchTrack};
-use std::path::PathBuf;
 
 fn mock_track() -> PitchTrack {
     let times: Vec<f32> = (0..1000).map(|i| i as f32 * 0.01).collect(); // 10s @ 100Hz
@@ -34,7 +33,7 @@ fn test_export_srt_with_lyrics() {
     assert!(first.tokens.iter().any(|t| t.primary_note.is_some()),
             "expected primary_note to be set");
 
-    let out = PathBuf::from("/tmp/test_export.srt");
+    let out = std::env::temp_dir().join("test_export.srt");
     export_srt(&track, &lines, &out).unwrap();
 
     let content = std::fs::read_to_string(&out).unwrap();
@@ -47,7 +46,7 @@ fn test_export_srt_with_lyrics() {
 #[test]
 fn test_export_srt_without_lyrics() {
     let track = mock_track();
-    let out = PathBuf::from("/tmp/test_export_no_lyrics.srt");
+    let out = std::env::temp_dir().join("test_export_no_lyrics.srt");
     export_srt(&track, &[], &out).unwrap();
 
     let content = std::fs::read_to_string(&out).unwrap();
@@ -94,7 +93,7 @@ fn test_srt_uses_primary_note_not_first() {
         }
     }
 
-    let out = PathBuf::from("/tmp/test_srt_primary.srt");
+    let out = std::env::temp_dir().join("test_srt_primary.srt");
     export_srt(&track, &lines, &out).unwrap();
     let content = std::fs::read_to_string(&out).unwrap();
     println!("SRT primary content:\n{}", content);

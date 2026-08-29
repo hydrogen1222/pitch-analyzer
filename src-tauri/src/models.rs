@@ -163,6 +163,11 @@ pub struct LyricLine {
     pub primary_text: String,
     #[serde(default)]
     pub translations: Vec<String>,
+    /// 逐字时间是否为程序自动估计 (DP 对齐或均匀分配)。
+    /// 自动估计的时间在重新分析音轨后需要重新对齐；
+    /// enhanced LRC 自带的逐字时间 (false) 则永远保留。
+    #[serde(default)]
+    pub token_timing_auto: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,5 +186,5 @@ pub fn midi_to_note_name(midi: f32) -> String {
         return "---".to_string();
     }
     let m = midi.round() as i32;
-    format!("{}{}", names[(((m % 12) + 12) % 12) as usize], m / 12 - 1)
+    format!("{}{}", names[m.rem_euclid(12) as usize], m.div_euclid(12) - 1)
 }
