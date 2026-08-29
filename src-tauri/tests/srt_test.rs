@@ -13,6 +13,7 @@ fn mock_track() -> PitchTrack {
         confidences: conf,
         midis,
         rms: Vec::new(),
+        flux: Vec::new(),
         note_events: Vec::new(),
     }
 }

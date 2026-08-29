@@ -118,6 +118,7 @@ fn test_align_clamps_to_voiced_window() {
         midis,
         rms: vec![0.0; n],
         note_events: Vec::new(),
+        flux: Vec::new(),
     };
 
     let mut lines = parse_lrc("[00:00.50]你好呀", Some(2.0));
@@ -154,6 +155,7 @@ fn test_align_skips_existing_times() {
         midis: vec![60.0, 60.0, 60.0],
         rms: Vec::new(),
         note_events: Vec::new(),
+        flux: Vec::new(),
     };
     let mut lines = parse_lrc("[00:00.50]你好呀", Some(2.0));
     // 手工设置逐字时间，模拟 enhanced LRC
@@ -175,6 +177,7 @@ fn test_bind_uses_note_events() {
         confidences: vec![0.9, 0.9],
         midis: vec![60.0, 60.0],
         rms: Vec::new(),
+        flux: Vec::new(),
         note_events: vec![NoteEvent {
             start: 1.0,
             end: 1.4,
@@ -275,14 +278,14 @@ fn test_parse_lrc_repeat_tags_at_line_start() {
 
 use pitch_analyzer_tauri_lib::lyrics::token_weight;
 
-/// 小書き仮名/長音符并入前一拍: きゃ=1拍, ラー=1拍
+/// 小書き仮名并入前一拍; 长音符为显示合并但语义上是独立一拍
 #[test]
 fn test_japanese_attach_char_merge() {
     let toks = tokenize("きゃりーぱみゅぱみゅ");
     assert_eq!(
         toks,
         vec!["きゃ", "りー", "ぱ", "みゅ", "ぱ", "みゅ"],
-        "small kana and chōonpu must merge into previous beat: {:?}",
+        "small kana and chōonpu merge into previous display token: {:?}",
         toks
     );
     // 前一 token 不是假名时不合并
@@ -290,15 +293,38 @@ fn test_japanese_attach_char_merge() {
     assert_ne!(toks2.first().map(|s| s.as_str()), Some("Aー"));
 }
 
-/// 权重: 汉字 ≈1.8 拍, 假名 =1 拍, 拉丁词 = 元音簇数
+/// 拗音 code point 正确性 (P0): ゃゅょ=3083/3085/3087, ャュョ=30E3/30E5/30E7
+/// 旧代码把 や(3084)/ヤ(30E4) 当小假名、漏掉 ょ(3087)/ョ(30E7)
+#[test]
+fn test_youon_codepoints() {
+    assert_eq!(tokenize("きょ"), vec!["きょ"], "き+ょ must merge (U+3087)");
+    assert_eq!(tokenize("キャ"), vec!["キャ"]);
+    assert_eq!(tokenize("キョ"), vec!["キョ"], "キ+ョ must merge (U+30E7)");
+    assert_eq!(tokenize("しゃ"), vec!["しゃ"]);
+    assert_eq!(tokenize("しゅ"), vec!["しゅ"], "しゅ (U+3085)");
+    // 普通大小的や/ヤ絶不附着
+    assert_eq!(tokenize("てや"), vec!["て", "や"], "や (U+3084) is a normal kana");
+    assert_eq!(tokenize("テヤ"), vec!["テ", "ヤ"], "ヤ (U+30E4) is a normal katakana");
+    assert_eq!(tokenize("や"), vec!["や"]);
+    assert_eq!(tokenize("ヤ"), vec!["ヤ"]);
+}
+
+/// 权重: 汉字 ≈1.8 拍, 假名 =1 拍, 长音符 = 独立 1 拍, 标点 = 0, 拉丁词 = 元音簇数
 #[test]
 fn test_token_weight_heuristics() {
     assert!((token_weight("心") - 1.8).abs() < 1e-4);
     assert!((token_weight("きゃ") - 1.0).abs() < 1e-4);
-    assert!((token_weight("りー") - 1.0).abs() < 1e-4);
+    // ー 是独立一拍: スーパー = スー(2) + パー(2) = 4 mora
+    assert!((token_weight("スーパー") - 4.0).abs() < 1e-4, "ス・ー・パ・ー = 4 mora");
+    assert!((token_weight("りー") - 2.0).abs() < 1e-4);
     assert!((token_weight("hello") - 2.0).abs() < 1e-4, "he-llo = 2 syllables");
     assert!((token_weight("through") - 1.0).abs() < 1e-4);
     assert!((token_weight("魔法") - 3.6).abs() < 1e-4);
+    // 促音/拨音各 1 拍
+    assert!((token_weight("がっこう") - 4.0).abs() < 1e-4, "が/っ/こ/う = 4");
+    // 标点零权重
+    assert!((token_weight("た。") - 1.0).abs() < 1e-4, "punctuation must be 0 mora");
+    assert!((token_weight("あ!") - 1.0).abs() < 1e-4);
 }
 
 /// 加权分配: "心を砕いた" (心=1.8, を=1, 砕=1.8, い=1, た=1, 总 6.6)
@@ -340,6 +366,7 @@ fn test_melisma_token_binding() {
         },
         rms: Vec::new(),
         note_events: Vec::new(),
+        flux: Vec::new(),
     };
     let mut lines = parse_lrc("[00:00.000]ああ", Some(1.0));
     distribute_token_times(&mut lines);

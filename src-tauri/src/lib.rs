@@ -11,6 +11,7 @@ pub mod audio;
 pub mod decoder;
 pub mod dsp;
 pub mod export;
+pub mod japanese;
 pub mod lyrics;
 pub mod mel;
 pub mod models;

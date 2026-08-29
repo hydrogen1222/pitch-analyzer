@@ -13,6 +13,8 @@ export class KaraokeDisplay {
   currentMidi: number | null = null;
   pitchFontSize: number = 48;
   lyricFontSize: number = 18;
+  /// 详细音高模式: 显示 token 的全部音高 (转音 C4→D4→E4), 默认紧凑只显示主音
+  detailedPitch: boolean = false;
 
   // 音名读数抗抖: vibrato 跨半音边界时 round() 会高频闪烁,
   // 候选音名需持续 noteHoldSecs 才替换 (MIDI 数值保持实时)
@@ -185,9 +187,29 @@ export class KaraokeDisplay {
       noteBox.style.justifyContent = "center";
       noteBox.style.alignItems = "center";
 
-      // 字幕默认显示 primary_note (duration × confidence 评分最高者)
+      // 默认紧凑模式: primary_note (软评分最高者);
+      // 详细模式: 全部 pitch_notes 以 → 连接 (转音可见)
       const primary = token.primary_note ?? this.bestNote(token);
-      if (primary) {
+      if (this.detailedPitch && token.pitch_notes.length > 1) {
+        const names = token.pitch_notes
+          .map((n) => {
+            const r = Math.round(n.median_midi);
+            return `${NOTE_NAMES[((r % 12) + 12) % 12]}${Math.floor(r / 12) - 1}`;
+          })
+          .join("→");
+        const noteEl = document.createElement("span");
+        noteEl.style.padding = "4px 8px";
+        noteEl.style.borderRadius = "6px";
+        noteEl.style.backgroundColor = isActive
+          ? "rgba(0, 212, 170, 0.55)"
+          : "rgba(0, 212, 170, 0.2)";
+        noteEl.style.color = isActive ? "#ffffff" : "#e6fff9";
+        noteEl.style.fontWeight = "700";
+        noteEl.style.fontSize = `${Math.max(9, Math.floor(this.lyricFontSize * 0.42))}px`;
+        noteEl.style.whiteSpace = "nowrap";
+        noteEl.textContent = names;
+        noteBox.appendChild(noteEl);
+      } else if (primary) {
         const noteEl = document.createElement("span");
         noteEl.style.padding = "4px 10px";
         noteEl.style.borderRadius = "6px";

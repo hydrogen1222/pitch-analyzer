@@ -14,6 +14,7 @@ fn track() -> PitchTrack {
         confidences: vec![0.9; n],
         midis: vec![60.0; n],
         rms: Vec::new(),
+        flux: Vec::new(),
         note_events: Vec::new(),
     }
 }

@@ -57,6 +57,18 @@ impl PitchAnalyzer {
             return Err("音频太短，无法计算 mel".into());
         }
 
+        // 谱通量 (相邻 log-mel 帧 L1 距离): 音素/音节边界的声学证据,
+        // 供歌词 mora DP 使用 (与 F0 无关, 转音不会误触发)
+        let mut flux = Vec::with_capacity(n_frames);
+        flux.push(0.0);
+        for f in 1..n_frames {
+            let mut d = 0.0f32;
+            for m in 0..n_mels {
+                d += (mel[(f, m)] - mel[(f - 1, m)]).abs();
+            }
+            flux.push(d / n_mels as f32);
+        }
+
         // 3. ONNX 推理: (1, n_frames, 128) → (1, n_frames, 360)
         progress_cb(0.6, "正在进行 AI 音高估计推理...");
         let mel_3d: Array3<f32> = mel.insert_axis(ndarray::Axis(0));
@@ -118,6 +130,7 @@ impl PitchAnalyzer {
             confidences,
             rms,
             note_events,
+            flux,
         })
     }
 }

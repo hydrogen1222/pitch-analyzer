@@ -397,6 +397,7 @@ async function initApp() {
   loadProjBtn = document.querySelector("#load-proj");
   exportSrtBtn = document.querySelector("#export-srt");
   exportAssBtn = document.querySelector("#export-ass");
+  const detailedPitchInput = document.querySelector("#detailed-pitch") as HTMLInputElement | null;
   pitchFontInput = document.querySelector("#font-pitch");
   lyricFontInput = document.querySelector("#font-lyric");
   selectModelBtn = document.querySelector("#select-model");
@@ -464,6 +465,10 @@ async function initApp() {
   volumeSlider?.addEventListener("input", async () => {
     const v = parseFloat(volumeSlider?.value || "100") / 100;
     try { await invoke("playback_set_volume", { vol: v }); } catch (_) {}
+  });
+
+  detailedPitchInput?.addEventListener("change", () => {
+    if (karaokeDisplay) karaokeDisplay.detailedPitch = detailedPitchInput?.checked ?? false;
   });
 
   pitchFontInput?.addEventListener("input", () => {

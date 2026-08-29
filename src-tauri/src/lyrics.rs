@@ -1,41 +1,173 @@
 // 歌词解析: LRC + TXT, tokenizer, 字级对齐, NoteEvent 绑定, primary note 选择
 
-use crate::models::{LyricLine, LyricToken, NoteEvent, NoteTrackingParams, PitchNote, PitchTrack};
+use crate::japanese::reading::JapaneseReadingProvider;
+use crate::japanese::{mora, phoneme, KanaOnlyProvider};
+use crate::models::{
+    AlignmentSource, LyricLine, LyricToken, MoraUnit, NoteEvent, NoteTrackingParams, PitchNote,
+    PitchTrack, UnpitchedReason,
+};
 use regex::Regex;
 use std::cmp::Ordering;
 
 // ── Tokenizer ──────────────────────────────────────────────
 
-/// 小書き仮名 / 長音符: 自身不成拍, 并入前一拍 (き+ゃ → きゃ, ラ+ー → ラー)
+/// 带原文 char 区间的 token (显示 token 可覆盖多个 char: きゃ / りー / 汉字+标点)
+#[derive(Debug, Clone)]
+pub struct SpannedToken {
+    pub text: String,
+    pub char_start: usize,
+    pub char_end: usize,
+}
+
+/// 日文拍合并 (显示层): 小書き与长音符并入前一假名 token。
+/// 注意: ー 合并只是显示分组, mora 计数由 token_weight 单独负责。
+fn merge_japanese_attach_chars_spans(tokens: &mut Vec<SpannedToken>) {
+    let mut i = 1;
+    while i < tokens.len() {
+        let is_single_attach = {
+            let mut chars = tokens[i].text.chars();
+            let first = chars.next();
+            tokens[i].text.chars().count() == 1
+                && first.map(|c| is_japanese_attach_char(c) || is_chionpu(c)).unwrap_or(false)
+        };
+        let prev_ends_kana = tokens[i - 1]
+            .text
+            .chars()
+            .last()
+            .map(|c| mora::is_kana_char(c) || is_chionpu(c))
+            .unwrap_or(false);
+        if is_single_attach && prev_ends_kana {
+            let attach = tokens.remove(i);
+            let prev = &mut tokens[i - 1];
+            prev.text.push_str(&attach.text);
+            prev.char_end = attach.char_end;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// 分词核心: 返回带 char 区间的 token
+pub fn tokenize_core(text: &str) -> Vec<SpannedToken> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let re = Regex::new(
+        r"(?x)
+        [a-zA-Z0-9]+(?:['\-][a-zA-Z0-9]+)*  # English/Latin words
+        |[\x{4e00}-\x{9fff}]                 # Chinese Hanzi
+        |[\x{3040}-\x{309f}]                 # Japanese Hiragana
+        |[\x{30a0}-\x{30ff}]                 # Japanese Katakana
+        |[^\s]                               # Fallback
+        "
+    )
+    .expect("Invalid tokenizer regex pattern");
+
+    let non_word_re = Regex::new(r"^[^\w\x{4e00}-\x{9fff}\x{3040}-\x{309f}\x{30a0}-\x{30ff}]+$")
+        .expect("Invalid non-word regex pattern");
+
+    // byte offset → char offset 查表
+    let char_of_byte: Vec<usize> = {
+        let mut map = Vec::with_capacity(text.len() + 1);
+        for (ci, (b, _)) in text.char_indices().enumerate() {
+            map.resize(b, ci);
+            map.push(ci);
+        }
+        map.resize(text.len() + 1, text.chars().count());
+        map
+    };
+
+    let mut tokens: Vec<SpannedToken> = Vec::new();
+    for m in re.find_iter(text) {
+        let cs = char_of_byte[m.start()];
+        let ce = char_of_byte[m.end()];
+        let piece = m.as_str();
+        if non_word_re.is_match(piece) && !tokens.is_empty() {
+            // 标点并入前一个显示 token (纯显示, 0 莫拉)
+            let last = tokens.last_mut().unwrap();
+            last.text.push_str(piece);
+            last.char_end = ce;
+        } else {
+            tokens.push(SpannedToken {
+                text: piece.to_string(),
+                char_start: cs,
+                char_end: ce,
+            });
+        }
+    }
+    merge_japanese_attach_chars_spans(&mut tokens);
+    tokens
+}
+
+pub fn tokenize(text: &str) -> Vec<String> {
+    tokenize_core(text).into_iter().map(|t| t.text).collect()
+}
+
+/// 填充行的日语三层文本结构: reading_spans → moras → token↔span 关联。
+/// KanaOnly: 假名片段自带读音, 汉字片段读音未知 (P1 接 UniDic 后替换 provider)。
+fn build_japanese_layers(line: &mut LyricLine) {
+    let provider = KanaOnlyProvider;
+    let Ok(spans) = provider.analyze(&line.primary_text) else {
+        return;
+    };
+
+    // moras: 按原文顺序, 假名 span 展开, 非假名 span 跳过 (0 mora)
+    let mut moras: Vec<MoraUnit> = Vec::new();
+    for (si, span) in spans.iter().enumerate() {
+        if span.reading.is_empty() {
+            continue;
+        }
+        // span 的 char 区间内解析 mora (span char_start 相对原文)
+        let span_text: String = line.primary_text.chars().skip(span.char_start).take(span.char_end - span.char_start).collect();
+        for pm in mora::parse_kana_moras(&span_text) {
+            let phonemes = phoneme::mora_to_phonemes(&pm.kana);
+            moras.push(MoraUnit {
+                kana: pm.kana,
+                phonemes,
+                reading_span_id: si,
+                char_start: span.char_start + pm.char_start,
+                char_end: span.char_start + pm.char_end,
+                start_time: None,
+                end_time: None,
+                confidence: span.confidence,
+                note_bindings: Vec::new(),
+            });
+        }
+    }
+
+    // token ↔ reading_span 关联 (char 区间求交)
+    let mut tokens = std::mem::take(&mut line.tokens);
+    for token in tokens.iter_mut() {
+        for (si, span) in spans.iter().enumerate() {
+            if token.char_start < span.char_end && span.char_start < token.char_end {
+                token.reading_span_ids.push(si);
+            }
+        }
+    }
+    line.tokens = tokens;
+    line.reading_spans = spans;
+    line.moras = moras;
+}
+
+// ── 莫拉计数权重 (无词典 fallback; P1 UniDic 后仅保留兜底) ─────────
+
+/// 长音符 ー (U+30FC): UI 上并入前字显示, 但语义上是独立的一拍
+fn is_chionpu(c: char) -> bool {
+    c == '\u{30FC}'
+}
+
+/// 小書き仮名 (显示合并用)
 fn is_japanese_attach_char(c: char) -> bool {
     matches!(
         c,
-        '\u{3041}' // ぁ
-            | '\u{3043}' // ぃ
-            | '\u{3045}' // ぅ
-            | '\u{3047}' // ぇ
-            | '\u{3049}' // ぉ
-            | '\u{3083}' // ゃ
-            | '\u{3084}' // ゅ
-            | '\u{3085}' // ょ
-            | '\u{30A1}' // ァ
-            | '\u{30A3}' // ィ
-            | '\u{30A5}' // ゥ
-            | '\u{30A7}' // ェ
-            | '\u{30A9}' // ォ
-            | '\u{30E3}' // ャ
-            | '\u{30E4}' // ュ
-            | '\u{30E5}' // ョ
-            | '\u{30EE}' // ヮ
-            | '\u{30FC}' // ー
+        '\u{3041}' | '\u{3043}' | '\u{3045}' | '\u{3047}' | '\u{3049}'
+            | '\u{3083}' | '\u{3085}' | '\u{3087}'
+            | '\u{30A1}' | '\u{30A3}' | '\u{30A5}' | '\u{30A7}' | '\u{30A9}'
+            | '\u{30E3}' | '\u{30E5}' | '\u{30E7}' | '\u{30EE}'
     )
 }
 
-fn is_kana_char(c: char) -> bool {
-    ('\u{3041}'..='\u{309F}').contains(&c) || ('\u{30A0}'..='\u{30FF}').contains(&c)
-}
-
-fn is_kanji_char(c: char) -> bool {
+pub fn is_kanji_char(c: char) -> bool {
     ('\u{4E00}'..='\u{9FFF}').contains(&c) || ('\u{3400}'..='\u{4DBF}').contains(&c)
 }
 
@@ -57,81 +189,31 @@ fn latin_syllable_count(word: &str) -> f32 {
     count.max(1.0)
 }
 
-/// 估算一个 token 对应的莫拉 (拍) 数。
-/// 无词典的启发式: 假名=1, 汉字≈1.8 (日语汉字平均 1.7~2.1 拍), 拉丁词=元音簇数。
-/// 用于 DP 对齐的时长分配与均匀分配的加权。
+/// 估算 token 的莫拉 (拍) 数。
+/// 假名部分用真实 mora 解析 (きゃ=1, スーパー=4, がっこう=4);
+/// 汉字 ≈1.8 拍 (统计均值, 无词典 fallback); 标点 = 0; 拉丁词 = 元音簇数。
 pub fn token_weight(text: &str) -> f32 {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
+    if text.is_empty() {
         return 1.0;
     }
-    if chars[0].is_ascii_alphabetic() {
+    let first = text.chars().next().unwrap();
+    if first.is_ascii_alphabetic() {
         return latin_syllable_count(text);
     }
-    let mut w = 0.0f32;
-    for &c in &chars {
+    // 假名/长音符/促音按 mora 状态机计数
+    let mut w = mora::parse_kana_moras(text).len() as f32;
+    for c in text.chars() {
         if is_kanji_char(c) {
             w += 1.8;
-        } else if is_japanese_attach_char(c) {
-            // 小書き/長音符已并入前一拍, 不重复计拍
+        } else if mora::is_kana_char(c) || c == '\u{30FC}' {
+            // 已由 mora 解析计入
+        } else if !c.is_alphanumeric() {
+            // 标点: 纯显示, 0 拍
         } else {
             w += 1.0;
         }
     }
     w.max(1.0)
-}
-
-/// 日文拍合并: 小書き/長音符并入前一假名 token (ドラマ歌词 "シー" ン 不再拆成 3 拍)
-fn merge_japanese_attach_chars(tokens: &mut Vec<String>) {
-    let mut i = 1;
-    while i < tokens.len() {
-        let mut chars = tokens[i].chars();
-        let is_single_attach = tokens[i].chars().count() == 1
-            && chars.next().map(is_japanese_attach_char).unwrap_or(false);
-        let prev_ends_kana = tokens[i - 1]
-            .chars()
-            .last()
-            .map(is_kana_char)
-            .unwrap_or(false);
-        if is_single_attach && prev_ends_kana {
-            let attach = tokens.remove(i);
-            tokens[i - 1].push_str(&attach);
-        } else {
-            i += 1;
-        }
-    }
-}
-
-pub fn tokenize(text: &str) -> Vec<String> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let re = Regex::new(
-        r"(?x)
-        [a-zA-Z0-9]+(?:['\-][a-zA-Z0-9]+)*  # English/Latin words
-        |[\x{4e00}-\x{9fff}]                 # Chinese Hanzi
-        |[\x{3040}-\x{309f}]                 # Japanese Hiragana
-        |[\x{30a0}-\x{30ff}]                 # Japanese Katakana
-        |[^\s]                               # Fallback
-        "
-    )
-    .expect("Invalid tokenizer regex pattern");
-
-    let non_word_re = Regex::new(r"^[^\w\x{4e00}-\x{9fff}\x{3040}-\x{309f}\x{30a0}-\x{30ff}]+$")
-        .expect("Invalid non-word regex pattern");
-
-    let raw: Vec<&str> = re.find_iter(text).map(|m| m.as_str()).collect();
-    let mut merged: Vec<String> = Vec::new();
-    for token in raw {
-        if non_word_re.is_match(token) && !merged.is_empty() {
-            let last = merged.last_mut().unwrap();
-            last.push_str(token);
-        } else {
-            merged.push(token.to_string());
-        }
-    }
-    merge_japanese_attach_chars(&mut merged);
-    merged
 }
 
 // ── TXT Parser ─────────────────────────────────────────────
@@ -143,26 +225,19 @@ pub fn parse_txt(text: &str) -> Vec<LyricLine> {
         if trimmed.is_empty() {
             continue;
         }
-        let token_strs = tokenize(trimmed);
-        let tokens = token_strs
-            .iter()
-            .map(|t| LyricToken {
-                text: t.clone(),
-                start_time: None,
-                end_time: None,
-                pitch_notes: Vec::new(),
-                primary_note: None,
-            })
+        let mut line = LyricLine::new(
+            trimmed.to_string(),
+            trimmed.to_string(),
+            Vec::new(),
+            None,
+            None,
+        );
+        line.tokens = tokenize_core(trimmed)
+            .into_iter()
+            .map(|t| LyricToken::new(t.text, t.char_start, t.char_end))
             .collect();
-        lines.push(LyricLine {
-            text: trimmed.to_string(),
-            start_time: None,
-            end_time: None,
-            tokens,
-            primary_text: trimmed.to_string(),
-            translations: Vec::new(),
-            token_timing_auto: false,
-        });
+        build_japanese_layers(&mut line);
+        lines.push(line);
     }
     lines
 }
@@ -195,6 +270,9 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
         text: String,
         /// enhanced LRC 逐字块: (该块起始时间, 块文本)。首块时间为 None。
         chunks: Vec<(Option<f32>, String)>,
+        /// enhanced LRC 逐字锚点: (原文 char 位置, 时间) — 权威逐字时间,
+        /// 绑定到原文 span 而非某次分词的 token 下标
+        anchors: Vec<(usize, f32)>,
     }
 
     let mut entries: Vec<RawEntry> = Vec::new();
@@ -233,6 +311,7 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
 
         // 切分 enhanced LRC 逐字块: <00:12.00>如<00:12.50>果
         let mut chunks: Vec<(Option<f32>, String)> = Vec::new();
+        let mut anchors: Vec<(usize, f32)> = Vec::new();
         let mut last_pos = 0usize;
         for cap in word_re.captures_iter(&raw_content) {
             let m = cap.get(0).unwrap();
@@ -246,6 +325,9 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
                 });
                 mins * 60.0 + s + frac.unwrap_or(0.0)
             };
+            // 锚点位置 = 标签结束处 (其后紧跟该时间对应的文字)
+            let char_pos = raw_content[..m.end()].chars().count();
+            anchors.push((char_pos, secs));
             let before = raw_content[last_pos..m.start()].trim().to_string();
             chunks.push((if chunks.is_empty() { None } else { chunks.last().unwrap().0 }, before));
             chunks.push((Some(secs), String::new()));
@@ -281,6 +363,7 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
                 end_time: explicit_end,
                 text: text_clean.clone(),
                 chunks: chunks.clone(),
+                anchors: anchors.clone(),
             });
         }
     }
@@ -292,7 +375,7 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
         end_time: Option<f32>,
         text: String,
         translations: Vec<String>,
-        chunks: Vec<(Option<f32>, String)>,
+        anchors: Vec<(usize, f32)>,
     }
     let mut merged: Vec<MergedEntry> = Vec::new();
     for entry in entries {
@@ -313,7 +396,7 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
             end_time: entry.end_time,
             text: entry.text,
             translations: Vec::new(),
-            chunks: entry.chunks,
+            anchors: entry.anchors,
         });
     }
 
@@ -335,43 +418,27 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
         };
 
         let primary_text = entry.text.clone();
-        let token_strs = tokenize(&primary_text);
-        let tokens = token_strs
-            .iter()
-            .map(|t| LyricToken {
-                text: t.clone(),
-                start_time: None,
-                end_time: None,
-                pitch_notes: Vec::new(),
-                primary_note: None,
-            })
-            .collect();
-
-        let display_text = if entry.translations.is_empty() {
+        let mut line = LyricLine::new(
+            String::new(),
+            primary_text.clone(),
+            entry.translations.clone(),
+            Some(start_time),
+            Some(end_time),
+        );
+        line.text = if entry.translations.is_empty() {
             primary_text.clone()
         } else {
             format!("{} | {}", primary_text, entry.translations.join(" / "))
         };
-
-        let mut line = LyricLine {
-            text: display_text,
-            start_time: Some(start_time),
-            end_time: Some(end_time),
-            tokens,
-            primary_text,
-            translations: entry.translations.clone(),
-            token_timing_auto: false,
-        };
-
-        // enhanced LRC: 歌词自带逐字时间 → 直接使用, 不做自动估计
-        let timed_chunks: Vec<(f32, String)> = entry
-            .chunks
-            .iter()
-            .filter(|(t, s)| t.is_some() && !s.trim().is_empty())
-            .map(|(t, s)| (t.unwrap(), s.clone()))
+        line.tokens = tokenize_core(&primary_text)
+            .into_iter()
+            .map(|t| LyricToken::new(t.text, t.char_start, t.char_end))
             .collect();
-        if timed_chunks.len() >= 2 {
-            apply_word_timings(&mut line, &timed_chunks, end_time);
+        build_japanese_layers(&mut line);
+
+        // enhanced LRC: 歌词自带逐字锚点 (绑定原文 span) → 直接使用, 不做自动估计
+        if entry.anchors.len() >= 2 {
+            apply_enhanced_anchor_timings(&mut line, &entry.anchors, end_time);
         }
 
         lines.push(line);
@@ -379,74 +446,58 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
     lines
 }
 
-/// 将 enhanced LRC 的逐字块时间应用到 token:
-/// 有锚定时间的块取块时间，块内多 token / 无锚定的 token 在相邻锚点间均匀分配。
-fn apply_word_timings(line: &mut LyricLine, timed_chunks: &[(f32, String)], line_end: f32) {
-    // 展开: [(token_text, anchor_time: Option<f32>), ...]
-    let mut items: Vec<(String, Option<f32>)> = Vec::new();
-    for (t, s) in timed_chunks {
-        for tok in tokenize(s) {
-            items.push((tok, Some(*t)));
-        }
-    }
-    if items.len() < 2 {
+/// enhanced LRC 逐字锚点按原文 span 应用 (不要求分词结果与逐字块一一对应):
+/// token 依据 char 区间落入锚点区间, 组内按莫拉权重分配时间。
+/// 权威来源标记为 AlignmentSource::EnhancedLrc, 任何重新分词都不会丢失锚点。
+fn apply_enhanced_anchor_timings(line: &mut LyricLine, anchors: &[(usize, f32)], line_end: f32) {
+    if anchors.len() < 2 || line.tokens.is_empty() {
         return;
     }
-    if items.len() != line.tokens.len() {
-        // 分词结果与逐字块不一致 (少见), 放弃逐字时间, 走自动估计
-        return;
-    }
-
-    // 锚点序列: 用于给无锚定 token 插值
-    let anchors: Vec<usize> = items.iter().enumerate().filter(|(_, (_, a))| a.is_some()).map(|(i, _)| i).collect();
-    for k in 0..line.tokens.len() {
-        let start = match items[k].1 {
-            Some(t) => t,
-            None => {
-                // 前后最近锚点间均匀插值
-                let prev = anchors.iter().rev().find(|&&a| a < k).map(|&a| (a, items[a].1.unwrap()));
-                let next = anchors.iter().find(|&&a| a > k).map(|&a| (a, items[a].1.unwrap()));
-                let (t0, t1) = match (prev, next) {
-                    (Some((_, ta)), Some((_, tb))) => (ta, tb),
-                    (Some((_, ta)), None) => (ta, line_end.max(ta)),
-                    (None, Some((_, tb))) => (line.start_time.unwrap_or(0.0), tb),
-                    (None, None) => continue,
-                };
-                let n_between = next.map(|(a, _)| a).unwrap_or(line.tokens.len())
-                    - prev.map(|(a, _)| a + 1).unwrap_or(0);
-                let n_between = n_between.max(1);
-                let idx = k - prev.map(|(a, _)| a + 1).unwrap_or(0);
-                t0 + (t1 - t0) * (idx as f32 / n_between as f32)
-            }
-        };
-        line.tokens[k].start_time = Some(start);
-    }
-    // end_time = 下一个 token 的 start (最后者取 line_end)
-    for k in 0..line.tokens.len() {
-        let end = if k + 1 < line.tokens.len() {
-            line.tokens[k + 1].start_time
+    let first_pos = anchors[0].0;
+    let line_start = line.start_time.unwrap_or(0.0);
+    // 组 0 = 首锚点之前的前导字符, 组 i+1 = 锚点 i
+    let mut groups: Vec<usize> = Vec::with_capacity(line.tokens.len());
+    for tok in &line.tokens {
+        if tok.char_start < first_pos {
+            groups.push(0);
         } else {
-            Some(line_end)
-        };
-        line.tokens[k].end_time = end;
-    }
-    // 首尾兜底: 首个 token 的 start 不早于行起点
-    if let Some(ls) = line.start_time {
-        for k in 0..line.tokens.len() {
-            if let Some(s) = line.tokens[k].start_time {
-                if s < ls {
-                    line.tokens[k].start_time = Some(ls);
+            let mut g = 1;
+            for (i, (pos, _)) in anchors.iter().enumerate() {
+                if *pos <= tok.char_start {
+                    g = i + 1;
                 }
             }
+            groups.push(g);
         }
     }
-    // 全部有效才算逐字时间成功
-    if line.tokens.iter().all(|t| t.start_time.is_some() && t.end_time.is_some()) {
-        return;
+    // 组 i (>=1) 的时间区间 = [t_{i-1}, t_i 或 line_end); 组 0 = [line_start, t_0)
+    let mut starts: Vec<f32> = Vec::with_capacity(anchors.len() + 1);
+    starts.push(line_start);
+    for (_, t) in anchors {
+        starts.push(*t);
     }
-    for t in line.tokens.iter_mut() {
-        t.start_time = None;
-        t.end_time = None;
+    let n_groups = starts.len();
+    for g in 0..n_groups {
+        let g_start = starts[g];
+        let g_end = if g + 1 < n_groups { starts[g + 1] } else { line_end };
+        if g_end <= g_start {
+            continue;
+        }
+        let idxs: Vec<usize> = (0..line.tokens.len()).filter(|&k| groups[k] == g).collect();
+        if idxs.is_empty() {
+            continue;
+        }
+        let weights: Vec<f32> = idxs.iter().map(|&k| token_weight(&line.tokens[k].text)).collect();
+        let total: f32 = weights.iter().sum::<f32>().max(1e-3);
+        let mut cur = g_start;
+        for (&k, &w) in idxs.iter().zip(&weights) {
+            let d = (g_end - g_start) * w / total;
+            line.tokens[k].start_time = Some(cur);
+            line.tokens[k].end_time = Some(cur + d);
+            line.tokens[k].alignment_source = Some(AlignmentSource::EnhancedLrc);
+            line.tokens[k].alignment_confidence = 1.0;
+            cur += d;
+        }
     }
 }
 
@@ -533,6 +584,11 @@ pub fn align_token_times(lines: &mut [LyricLine], track: &PitchTrack, params: &T
         } else {
             distribute_line_times(line, start, end);
             line.token_timing_auto = true;
+            for token in &mut line.tokens {
+                if token.start_time.is_some() {
+                    token.alignment_source = Some(AlignmentSource::WeightedFallback);
+                }
+            }
         }
         // 行首/行尾裁剪: 前奏或间奏很长时, 发声区域之外的时间歌词会长时间
         // 静止挂屏; 发声起点超过行首 2s (行尾超过 1s) 就把显示窗口收紧到演唱附近
@@ -553,7 +609,58 @@ pub fn align_token_times(lines: &mut [LyricLine], track: &PitchTrack, params: &T
     }
 }
 
-/// 基于特征 DP 的句内字级对齐。返回是否成功；失败由调用方回退均匀分配。
+/// 一个声学对齐单元: 已知 mora (假名) 或未知读音片段 (汉字/拉丁, 时长先验)。
+/// 显示 token 可包含多个 unit (位 → く・ら・い 共 3 个 mora unit)。
+#[derive(Debug, Clone)]
+struct AlignUnit {
+    token_idx: usize,
+    weight: f32,
+    /// 读音已知 (假名 mora) = true; 启发式先验 (汉字/拉丁) = false
+    known: bool,
+    mora_idx: Option<usize>,
+}
+
+/// 从显示 token + moras 构建 DP 单元序列。
+/// 假名 token 拆成逐 mora unit; 无假名 token (汉字/拉丁) 退化为单个先验 unit。
+fn build_align_units(line: &LyricLine) -> Vec<AlignUnit> {
+    let mut units = Vec::new();
+    for (ti, token) in line.tokens.iter().enumerate() {
+        let token_moras: Vec<usize> = line
+            .moras
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| token.char_start < m.char_end && m.char_start < token.char_end)
+            .map(|(mi, _)| mi)
+            .collect();
+        if token_moras.is_empty() {
+            units.push(AlignUnit {
+                token_idx: ti,
+                weight: token_weight(&token.text),
+                known: false,
+                mora_idx: None,
+            });
+        } else {
+            for mi in token_moras {
+                units.push(AlignUnit {
+                    token_idx: ti,
+                    weight: 1.0,
+                    known: true,
+                    mora_idx: Some(mi),
+                });
+            }
+        }
+    }
+    units
+}
+
+/// 基于声学特征的句内 mora 对齐 (任务书 P2)。
+///
+///   - 对齐单位是 mora / 先验 unit, 不再强制 "显示字 = 声学段"
+///   - 边界证据: 谱通量峰、能量谷/起音、voiced↔unvoiced 转移 (全部与音高无关)
+///   - F0 换音不作为歌词边界证据 (转音恰恰证明二者不是同一件事)
+///   - 搜索窗口为整行, 不裁剪到 voiced 区域 (无声化/促音也有语言边界信息)
+///
+/// 返回 false 时由调用方回退加权均匀分配。
 fn dp_align_line(
     line: &mut LyricLine,
     track: &PitchTrack,
@@ -561,15 +668,15 @@ fn dp_align_line(
     line_end: f32,
     params: &TokenAlignParams,
 ) -> bool {
-    let n_tokens = line.tokens.len();
-    if n_tokens < 2 || track.times.is_empty() {
+    let units = build_align_units(line);
+    let n_units = units.len();
+    if n_units < 2 || track.times.is_empty() {
         return false;
     }
 
-    // 收集 line 范围内帧索引
+    // 行内帧索引 (整个行窗口)
     let mut fidx: Vec<usize> = Vec::new();
-    for i in 0..track.times.len() {
-        let t = track.times[i];
+    for (i, &t) in track.times.iter().enumerate() {
         if t >= line_start && t < line_end {
             fidx.push(i);
         }
@@ -578,12 +685,16 @@ fn dp_align_line(
         return false;
     }
 
-    // 对齐窗口限定到 voiced 发声区域 (首尾留 margin)
+    // 软活动窗口: 有 voicing 或有能量 (RMS) 的帧 ± margin。
+    // 不再硬性要求 F0 (无声化/促音闭塞的语言单位 F0 缺失但有能量),
+    // 但纯数字静音仍被排除, 避免歌词摊进无声区
     let margin = params.voiced_margin_ms / 1000.0;
     let mut v_first: Option<usize> = None;
     let mut v_last: usize = fidx[0];
     for &fi in &fidx {
-        if !track.midis[fi].is_nan() {
+        let voiced = !track.midis[fi].is_nan();
+        let has_energy = track.rms.get(fi).copied().unwrap_or(0.0) > 0.01;
+        if voiced || has_energy {
             if v_first.is_none() {
                 v_first = Some(fi);
             }
@@ -602,7 +713,7 @@ fn dp_align_line(
         return false;
     }
 
-    // 重新只取窗口内帧
+    // 窗口内重新取帧
     let fidx: Vec<usize> = fidx
         .into_iter()
         .filter(|&i| track.times[i] >= align_start && track.times[i] < align_end)
@@ -610,37 +721,49 @@ fn dp_align_line(
     if fidx.len() < 2 {
         return false;
     }
-
     let total_dur = align_end - align_start;
 
-    // 莫拉加权: 汉字 ≈1.8 拍, 假名 =1 拍, 拉丁词 = 元音簇数。
-    // 期望时长按权重分配, 否则 "心を砕いた嵐の中" (8字 13拍) 会被切成 8 等份,
-    // 边界全部落在拍子中间
-    let weights: Vec<f32> = line.tokens.iter().map(|t| token_weight(&t.text)).collect();
+    // 行内谱通量自适应阈值
+    let flux_mean = if !track.flux.is_empty() {
+        let sum: f32 = fidx.iter().filter_map(|&i| track.flux.get(i).copied()).sum();
+        sum / fidx.len() as f32
+    } else {
+        0.0
+    };
+
+    let weights: Vec<f32> = units.iter().map(|u| u.weight).collect();
     let total_w: f32 = weights.iter().sum::<f32>().max(1.0);
     let ideal_unit = total_dur / total_w;
-    let min_dur = (params.min_token_duration_ms / 1000.0).min(ideal_unit);
+    let min_dur = (params.min_token_duration_ms / 1000.0).min(ideal_unit).max(0.02);
 
-    // 边界得分: 无音间隙 / F0 变化 / RMS 能量谷 → 好的音节边界
+    // 边界得分: 纯声学证据, 与音高解耦
     let boundary_score = |fi: usize| -> f32 {
         let mut s = 0.0f32;
-        if track.midis[fi].is_nan() {
-            s += 2.0; // 落在无声间隙
-        } else if fi > 0 && track.midis[fi - 1].is_nan() {
-            s += 1.0; // 起音处
+        let cur_voiced = fi < track.midis.len() && !track.midis[fi].is_nan();
+        let prev_voiced = fi > 0 && !track.midis[fi - 1].is_nan();
+        if prev_voiced && !cur_voiced {
+            s += 1.5; // 发声结束
         }
-        if fi > 0 {
-            let m0 = track.midis[fi - 1];
-            let m1 = track.midis[fi];
-            if !m0.is_nan() && !m1.is_nan() && m0.round() as i32 != m1.round() as i32 {
-                s += 1.5; // F0 换音
-            }
+        if !prev_voiced && cur_voiced {
+            s += 1.0; // 起音
         }
         if fi > 0 && track.rms.len() > fi {
             let r0 = track.rms[fi - 1];
             let r1 = track.rms[fi];
             if r1 < r0 * 0.6 {
                 s += 1.0; // 能量谷
+            }
+            if r1 > r0 * 1.6 {
+                s += 0.8; // 能量上升 (新辅音起音)
+            }
+        }
+        if fi > 0 && flux_mean > 0.0 {
+            if let Some(&f) = track.flux.get(fi) {
+                if f > flux_mean * 1.5 {
+                    s += 2.0; // 谱通量峰: 音素/音节转换的强证据
+                } else if f > flux_mean {
+                    s += 0.8;
+                }
             }
         }
         s
@@ -649,10 +772,10 @@ fn dp_align_line(
     let time_at = |j: usize| track.times[fidx[j]];
     let inf = f32::INFINITY;
     let m = fidx.len();
-    let last_k = n_tokens - 2; // 需要内部边界的最大 token 下标 (0..=n-2 有内部边界)
+    let last_k = n_units - 2;
 
-    let mut dp = vec![vec![inf; m]; n_tokens];
-    let mut parent = vec![vec![usize::MAX; m]; n_tokens];
+    let mut dp = vec![vec![inf; m]; n_units];
+    let mut parent = vec![vec![usize::MAX; m]; n_units];
 
     let seg_cost = |prev_t: f32, cur_t: f32, score: f32, w: f32| -> f32 {
         let dur = cur_t - prev_t;
@@ -665,7 +788,6 @@ fn dp_align_line(
         dur_cost + bnd_cost
     };
 
-    // 第一个 token 从 align_start 开始
     for j in 0..m {
         let t1 = time_at(j);
         if t1 <= align_start {
@@ -674,7 +796,6 @@ fn dp_align_line(
         dp[0][j] = seg_cost(align_start, t1, boundary_score(fidx[j]), weights[0]);
     }
 
-    // 中间 token
     for k in 1..=last_k {
         for j in k..m {
             let t_j = time_at(j);
@@ -696,7 +817,6 @@ fn dp_align_line(
         }
     }
 
-    // 最后一个 token 结束于 align_end
     let mut best_cost = inf;
     let mut best_j = usize::MAX;
     for j in last_k..m {
@@ -704,7 +824,7 @@ fn dp_align_line(
             continue;
         }
         let t_j = time_at(j);
-        let c = dp[last_k][j] + seg_cost(t_j, align_end, 0.0, weights[n_tokens - 1]);
+        let c = dp[last_k][j] + seg_cost(t_j, align_end, 0.0, weights[n_units - 1]);
         if c < best_cost {
             best_cost = c;
             best_j = j;
@@ -714,24 +834,64 @@ fn dp_align_line(
         return false;
     }
 
-    // 回溯边界
-    let mut b_after = vec![usize::MAX; n_tokens];
+    // 回溯 unit 边界
+    let mut b_after = vec![usize::MAX; n_units];
     let mut cur = best_j;
     for k in (0..=last_k).rev() {
         b_after[k] = cur;
         cur = parent[k][cur];
     }
 
+    let mut unit_times: Vec<(f32, f32)> = Vec::with_capacity(n_units);
     let mut prev_time = align_start;
-    for k in 0..n_tokens {
-        let t_end = if k == n_tokens - 1 {
+    for k in 0..n_units {
+        let t_end = if k == n_units - 1 {
             align_end
         } else {
             time_at(b_after[k])
         };
-        line.tokens[k].start_time = Some(prev_time);
-        line.tokens[k].end_time = Some(t_end);
+        unit_times.push((prev_time, t_end));
         prev_time = t_end;
+    }
+
+    // 回填 mora 时间
+    for (u, &(us, ue)) in units.iter().zip(&unit_times) {
+        if let Some(mi) = u.mora_idx {
+            if let Some(m) = line.moras.get_mut(mi) {
+                m.start_time = Some(us);
+                m.end_time = Some(ue);
+                m.confidence = if u.known { 0.7 } else { 0.3 };
+            }
+        }
+    }
+    // 回填 token 时间 (其 units 的首尾) 与对齐置信度 (已知读音权重占比)
+    let n_tokens = line.tokens.len();
+    let mut token_first = vec![None; n_tokens];
+    let mut token_last = vec![None; n_tokens];
+    let mut token_known_w = vec![0.0f32; n_tokens];
+    let mut token_total_w = vec![0.0f32; n_tokens];
+    for (u, &(us, ue)) in units.iter().zip(&unit_times) {
+        let ti = u.token_idx;
+        if token_first[ti].is_none() {
+            token_first[ti] = Some(us);
+        }
+        token_last[ti] = Some(ue);
+        token_total_w[ti] += u.weight;
+        if u.known {
+            token_known_w[ti] += u.weight;
+        }
+    }
+    for (ti, token) in line.tokens.iter_mut().enumerate() {
+        if let (Some(s), Some(e)) = (token_first[ti], token_last[ti]) {
+            token.start_time = Some(s);
+            token.end_time = Some(e);
+            token.alignment_source = Some(AlignmentSource::MoraDp);
+            token.alignment_confidence = if token_total_w[ti] > 0.0 {
+                token_known_w[ti] / token_total_w[ti]
+            } else {
+                0.0
+            };
+        }
     }
     true
 }
@@ -741,10 +901,14 @@ fn dp_align_line(
 const MIN_NOTE_FRAMES: usize = 5;
 const DOMINANT_NOTE_RATIO: f32 = 0.65;
 
-/// 绑定 pitch 到每个 token，并选择 primary_note。
+/// 绑定 pitch 到每个 token (软评分, many-to-many) 并选 primary_note。
 ///
-/// 优先使用 NoteEvent (Annotation Track)；无 NoteEvent 时回退到帧级分段。
-/// 绑定时忽略 token 首尾 edge_ignore margin，使用中心稳定区域。
+/// - 候选生成: 与 token 窗口 (含 30ms 容差, 仅用于发现) 有重叠的 NoteEvent;
+/// - 评分: score = 0.55*overlap_ratio_token + 0.30*overlap_ratio_note + 0.15*confidence;
+///   评分只使用无容差的真实重叠, 相邻音不会凭空继承;
+/// - 全部候选保留在 pitch_notes (转音 melisma 可见), primary_note 仅是紧凑显示的代表;
+/// - 无候选时给出 UnpitchedReason (区分物理无声与对齐失败);
+/// - 旧工程无 NoteEvent 时回退帧级分段。
 pub fn bind_pitch_to_tokens(
     lines: &mut [LyricLine],
     pitch_track: &PitchTrack,
@@ -754,58 +918,129 @@ pub fn bind_pitch_to_tokens(
     if pitch_track.times.is_empty() {
         return;
     }
-    let edge_ignore = note_tracking.edge_ignore_ms / 1000.0;
     let min_dur = note_tracking.min_note_duration_ms / 1000.0;
+    const CAND_TOL: f32 = 0.03;
 
     for line in lines.iter_mut() {
         for token in &mut line.tokens {
             let (t_start, t_end) = match (token.start_time, token.end_time) {
                 (Some(s), Some(e)) => (s, e),
-                _ => continue,
-            };
-            // 中心稳定区域
-            let c_start = t_start + edge_ignore;
-            let c_end = t_end - edge_ignore;
-            let (c_start, c_end) = if c_end > c_start {
-                (c_start, c_end)
-            } else {
-                (t_start, t_end)
+                _ => {
+                    token.unpitched_reason = Some(UnpitchedReason::AlignmentMissing);
+                    continue;
+                }
             };
 
-            if !pitch_track.note_events.is_empty() {
+            if pitch_track.note_events.is_empty() {
+                // 旧工程回退: 帧级分段 (无中心裁剪)
                 token.pitch_notes =
-                    note_events_in_range(&pitch_track.note_events, c_start, c_end, note_tracking);
-            } else {
-                token.pitch_notes =
-                    frame_segment_notes(pitch_track, c_start, c_end, confidence_threshold);
+                    frame_segment_notes(pitch_track, t_start, t_end, confidence_threshold);
+                token.primary_note =
+                    select_primary_note(&token.pitch_notes, min_dur, confidence_threshold);
+                if token.primary_note.is_none() {
+                    token.unpitched_reason = Some(UnpitchedReason::NoOverlappingNote);
+                }
+                continue;
             }
-            token.primary_note =
-                select_primary_note(&token.pitch_notes, min_dur, confidence_threshold);
+
+            // 一次遍历: 记录 (真实重叠评分, 容差重叠信息)
+            let token_len = (t_end - t_start).max(1e-3);
+            struct Cand {
+                idx: usize,
+                score: f32,
+            }
+            let mut real_cands: Vec<Cand> = Vec::new();
+            let mut tol_cands: Vec<Cand> = Vec::new();
+            for (i, ev) in pitch_track.note_events.iter().enumerate() {
+                // 容差窗口 (仅候选发现)
+                let ov_start = ev.start.max(t_start - CAND_TOL);
+                let ov_end = ev.end.min(t_end + CAND_TOL);
+                if ov_end - ov_start <= 0.0 {
+                    continue;
+                }
+                // 真实重叠 (评分依据)
+                let rs = ev.start.max(t_start);
+                let re_ = ev.end.min(t_end);
+                let ov_real = (re_ - rs).max(0.0);
+                if ov_real > 0.0 {
+                    let r_tok = ov_real / token_len;
+                    let r_note = ov_real / (ev.end - ev.start).max(1e-3);
+                    let score = 0.55 * r_tok + 0.30 * r_note + 0.15 * ev.confidence;
+                    real_cands.push(Cand { idx: i, score });
+                } else {
+                    // 零真实重叠: 只有置信度分量, 排在一切有真实重叠的候选之后
+                    let score = 0.15 * ev.confidence;
+                    tol_cands.push(Cand { idx: i, score });
+                }
+            }
+
+            if real_cands.is_empty() {
+                // 允许纯容差候选 (边界误差几十 ms 的兜底), 但没有就明确标注原因
+                if tol_cands.is_empty() {
+                    token.unpitched_reason = Some(unpitched_reason_for(
+                        pitch_track,
+                        t_start,
+                        t_end,
+                        confidence_threshold,
+                    ));
+                } else {
+                    tol_cands.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+                    let best = &tol_cands[0];
+                    let ev = &pitch_track.note_events[best.idx];
+                    token.pitch_notes = vec![note_event_to_pitch_note(ev, t_start, t_end)];
+                    token.primary_note = Some(token.pitch_notes[0].clone());
+                    token.unpitched_reason = None;
+                }
+                continue;
+            }
+
+            real_cands.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+            token.pitch_notes = real_cands
+                .iter()
+                .map(|c| {
+                    let ev = &pitch_track.note_events[c.idx];
+                    let rs = ev.start.max(t_start);
+                    let re_ = ev.end.min(t_end);
+                    note_event_to_pitch_note(ev, rs, re_)
+                })
+                .collect();
+            // primary = 软评分最高者 (时长×重叠占比×置信度的综合)
+            token.primary_note = Some(token.pitch_notes[0].clone());
+            token.unpitched_reason = None;
         }
     }
 }
 
-/// 取与 token 中心区域有足够重叠的 NoteEvent (起始时间裁剪到 token 内)
-fn note_events_in_range(
-    events: &[NoteEvent],
-    start: f32,
-    end: f32,
-    params: &NoteTrackingParams,
-) -> Vec<PitchNote> {
-    let min_overlap = (params.edge_ignore_ms / 1000.0).max(0.0);
-    events
-        .iter()
-        .filter_map(|ev| {
-            let ov_start = ev.start.max(start);
-            let ov_end = ev.end.min(end);
-            let overlap = ov_end - ov_start;
-            if overlap >= min_overlap && overlap > 0.0 {
-                Some(note_event_to_pitch_note(ev, ov_start, ov_end))
-            } else {
-                None
+/// 无音高原因判定: 物理无声 (静音/无声化) 与算法丢失分开
+fn unpitched_reason_for(
+    track: &PitchTrack,
+    t_start: f32,
+    t_end: f32,
+    confidence_threshold: f32,
+) -> UnpitchedReason {
+    let mut voiced = 0usize;
+    let mut confident = 0usize;
+    for (i, &t) in track.times.iter().enumerate() {
+        if t < t_start {
+            continue;
+        }
+        if t >= t_end {
+            break;
+        }
+        if !track.midis[i].is_nan() {
+            voiced += 1;
+            if track.confidences.get(i).copied().unwrap_or(0.0) >= confidence_threshold {
+                confident += 1;
             }
-        })
-        .collect()
+        }
+    }
+    if voiced == 0 {
+        UnpitchedReason::NoVoicing
+    } else if confident == 0 {
+        UnpitchedReason::LowPitchConfidence
+    } else {
+        UnpitchedReason::NoOverlappingNote
+    }
 }
 
 fn note_event_to_pitch_note(ev: &NoteEvent, start: f32, end: f32) -> PitchNote {
