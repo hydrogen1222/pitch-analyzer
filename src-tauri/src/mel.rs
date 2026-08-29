@@ -50,9 +50,15 @@ pub struct MelExtractor {
 impl MelExtractor {
     pub fn new(cfg: MelConfig) -> Self {
         let window = hann_window(cfg.win);
-        let mel_basis = librosa_mel_filterbank(cfg.sr as f32, cfg.n_fft, cfg.n_mels, cfg.fmin, cfg.fmax);
+        let mel_basis =
+            librosa_mel_filterbank(cfg.sr as f32, cfg.n_fft, cfg.n_mels, cfg.fmin, cfg.fmax);
         let fft = FftPlanner::new().plan_fft_forward(cfg.n_fft);
-        Self { cfg, window, mel_basis, fft }
+        Self {
+            cfg,
+            window,
+            mel_basis,
+            fft,
+        }
     }
 
     /// 返回 (n_frames, n_mels) 的 log-mel
@@ -60,7 +66,7 @@ impl MelExtractor {
         let n = wav.len();
         let pad_left = (self.cfg.win - self.cfg.hop) / 2;
         let pad_right = std::cmp::max(
-            (self.cfg.win - self.cfg.hop + 1) / 2,
+            (self.cfg.win - self.cfg.hop).div_ceil(2),
             self.cfg.win.saturating_sub(n + pad_left),
         );
         let padded = reflect_pad(wav, pad_left, pad_right);
@@ -146,7 +152,13 @@ fn reflect_pad(x: &[f32], left: usize, right: usize) -> Vec<f32> {
 
 /// 复刻 librosa.filters.mel(sr, n_fft, n_mels, fmin, fmax)
 /// 默认 htk=False, norm='slaney'
-fn librosa_mel_filterbank(sr: f32, n_fft: usize, n_mels: usize, fmin: f32, fmax: f32) -> Array2<f32> {
+fn librosa_mel_filterbank(
+    sr: f32,
+    n_fft: usize,
+    n_mels: usize,
+    fmin: f32,
+    fmax: f32,
+) -> Array2<f32> {
     let n_bins = n_fft / 2 + 1;
     let fft_freqs: Vec<f32> = (0..n_bins).map(|k| k as f32 * sr / n_fft as f32).collect();
 
@@ -158,7 +170,9 @@ fn librosa_mel_filterbank(sr: f32, n_fft: usize, n_mels: usize, fmin: f32, fmax:
     let hz_pts: Vec<f32> = mel_pts.iter().map(|&m| mel_to_hz_slaney(m)).collect();
 
     let mut weights = Array2::<f32>::zeros((n_mels, n_bins));
-    let fdiff: Vec<f32> = (0..hz_pts.len() - 1).map(|i| hz_pts[i + 1] - hz_pts[i]).collect();
+    let fdiff: Vec<f32> = (0..hz_pts.len() - 1)
+        .map(|i| hz_pts[i + 1] - hz_pts[i])
+        .collect();
 
     for i in 0..n_mels {
         for k in 0..n_bins {

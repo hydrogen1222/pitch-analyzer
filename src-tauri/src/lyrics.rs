@@ -28,7 +28,9 @@ fn merge_japanese_attach_chars_spans(tokens: &mut Vec<SpannedToken>) {
             let mut chars = tokens[i].text.chars();
             let first = chars.next();
             tokens[i].text.chars().count() == 1
-                && first.map(|c| is_japanese_attach_char(c) || is_chionpu(c)).unwrap_or(false)
+                && first
+                    .map(|c| is_japanese_attach_char(c) || is_chionpu(c))
+                    .unwrap_or(false)
         };
         let prev_ends_kana = tokens[i - 1]
             .text
@@ -59,7 +61,7 @@ pub fn tokenize_core(text: &str) -> Vec<SpannedToken> {
         |[\x{3040}-\x{309f}]                 # Japanese Hiragana
         |[\x{30a0}-\x{30ff}]                 # Japanese Katakana
         |[^\s]                               # Fallback
-        "
+        ",
     )
     .expect("Invalid tokenizer regex pattern");
 
@@ -111,22 +113,41 @@ fn build_japanese_layers(line: &mut LyricLine) {
         return;
     };
 
-    // moras: 按原文顺序, 假名 span 展开, 非假名 span 跳过 (0 mora)
+    // moras: 必须从读音 (pronunciation 优先, 其次 reading) 展开, 而非 surface
+    // (任务书 5.2: surface="愛" reading="あい" 时拿 surface 拆 mora 永远得 0)
     let mut moras: Vec<MoraUnit> = Vec::new();
     for (si, span) in spans.iter().enumerate() {
-        if span.reading.is_empty() {
-            continue;
+        let phonetic = if !span.pronunciation.is_empty() {
+            span.pronunciation.clone()
+        } else {
+            span.reading.clone()
+        };
+        if phonetic.is_empty() {
+            continue; // 读音未知 (需词典/override), 不产生 mora
         }
-        // span 的 char 区间内解析 mora (span char_start 相对原文)
-        let span_text: String = line.primary_text.chars().skip(span.char_start).take(span.char_end - span.char_start).collect();
-        for pm in mora::parse_kana_moras(&span_text) {
+        // reading 与 surface 文本一致 (kana-only) → char 区间 1:1 精确;
+        // 词典读音 → mora 继承整个 span 的 surface 区间 (coarse, 不伪造逐字映射)
+        let exact = phonetic == span.surface;
+        for pm in mora::parse_kana_moras(&phonetic) {
+            let (cs, ce) = if exact {
+                (
+                    span.char_start + pm.char_start,
+                    span.char_start + pm.char_end,
+                )
+            } else {
+                (span.char_start, span.char_end) // coarse display span
+            };
             let phonemes = phoneme::mora_to_phonemes(&pm.kana);
             moras.push(MoraUnit {
                 kana: pm.kana,
                 phonemes,
                 reading_span_id: si,
-                char_start: span.char_start + pm.char_start,
-                char_end: span.char_start + pm.char_end,
+                char_start: cs,
+                char_end: ce,
+                reading_offset_start: pm.char_start,
+                reading_offset_end: pm.char_end,
+                display_start: span.display_start,
+                display_end: span.display_end,
                 start_time: None,
                 end_time: None,
                 confidence: span.confidence,
@@ -160,10 +181,23 @@ fn is_chionpu(c: char) -> bool {
 fn is_japanese_attach_char(c: char) -> bool {
     matches!(
         c,
-        '\u{3041}' | '\u{3043}' | '\u{3045}' | '\u{3047}' | '\u{3049}'
-            | '\u{3083}' | '\u{3085}' | '\u{3087}'
-            | '\u{30A1}' | '\u{30A3}' | '\u{30A5}' | '\u{30A7}' | '\u{30A9}'
-            | '\u{30E3}' | '\u{30E5}' | '\u{30E7}' | '\u{30EE}'
+        '\u{3041}'
+            | '\u{3043}'
+            | '\u{3045}'
+            | '\u{3047}'
+            | '\u{3049}'
+            | '\u{3083}'
+            | '\u{3085}'
+            | '\u{3087}'
+            | '\u{30A1}'
+            | '\u{30A3}'
+            | '\u{30A5}'
+            | '\u{30A7}'
+            | '\u{30A9}'
+            | '\u{30E3}'
+            | '\u{30E5}'
+            | '\u{30E7}'
+            | '\u{30EE}'
     )
 }
 
@@ -268,8 +302,6 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
         /// 扩展行时格式 ([start]text[end]) 自带的结束时间, None = 未提供
         end_time: Option<f32>,
         text: String,
-        /// enhanced LRC 逐字块: (该块起始时间, 块文本)。首块时间为 None。
-        chunks: Vec<(Option<f32>, String)>,
         /// enhanced LRC 逐字锚点: (原文 char 位置, 时间) — 权威逐字时间,
         /// 绑定到原文 span 而非某次分词的 token 下标
         anchors: Vec<(usize, f32)>,
@@ -309,50 +341,26 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
             (tags.iter().map(|(t, _, _)| *t).collect(), None)
         };
 
-        // 切分 enhanced LRC 逐字块: <00:12.00>如<00:12.50>果
-        let mut chunks: Vec<(Option<f32>, String)> = Vec::new();
+        // enhanced LRC 逐字锚点: <00:12.00>如<00:12.50>果
+        // 锚点位置 = 标签结束处 (其后紧跟该时间对应的文字), 绑定原文 span
         let mut anchors: Vec<(usize, f32)> = Vec::new();
-        let mut last_pos = 0usize;
         for cap in word_re.captures_iter(&raw_content) {
             let m = cap.get(0).unwrap();
             let secs: f32 = {
                 let mins: f32 = cap[1].parse().unwrap_or(0.0);
-                let s: f32 = cap[2].parse().unwrap_or(0.0);
+                let sec: f32 = cap[2].parse().unwrap_or(0.0);
                 let frac = cap.get(3).map(|f| {
                     let digits = f.as_str();
                     let v: f32 = digits.parse().unwrap_or(0.0);
                     v / 10f32.powi(digits.len() as i32)
                 });
-                mins * 60.0 + s + frac.unwrap_or(0.0)
+                mins * 60.0 + sec + frac.unwrap_or(0.0)
             };
-            // 锚点位置 = 标签结束处 (其后紧跟该时间对应的文字)
             let char_pos = raw_content[..m.end()].chars().count();
             anchors.push((char_pos, secs));
-            let before = raw_content[last_pos..m.start()].trim().to_string();
-            chunks.push((if chunks.is_empty() { None } else { chunks.last().unwrap().0 }, before));
-            chunks.push((Some(secs), String::new()));
-            last_pos = m.end();
         }
-        let tail = raw_content[last_pos..].trim().to_string();
-        chunks.push((chunks.last().and_then(|c| c.0), tail));
 
-        let word_tag_count = chunks.iter().filter(|(t, _)| t.is_some()).count();
-        let (text_clean, chunks) = if word_tag_count >= 2 {
-            // 相邻空块合并, 得到 [(None|Some, 文本), ...]
-            let mut merged_chunks: Vec<(Option<f32>, String)> = Vec::new();
-            for (t, s) in chunks {
-                let s = s.trim().to_string();
-                if !merged_chunks.is_empty() && merged_chunks.last().unwrap().0 == t {
-                    merged_chunks.last_mut().unwrap().1.push_str(&s);
-                } else {
-                    merged_chunks.push((t, s));
-                }
-            }
-            let text_clean: String = word_re.replace_all(&raw_content, "").split_whitespace().collect::<Vec<_>>().join(" ");
-            (text_clean, merged_chunks)
-        } else {
-            (word_re.replace_all(&raw_content, "").trim().to_string(), vec![(None, raw_content.clone())])
-        };
+        let text_clean = word_re.replace_all(&raw_content, "").trim().to_string();
         if text_clean.is_empty() {
             continue;
         }
@@ -362,7 +370,6 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
                 start_time: start,
                 end_time: explicit_end,
                 text: text_clean.clone(),
-                chunks: chunks.clone(),
                 anchors: anchors.clone(),
             });
         }
@@ -383,9 +390,10 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
             if (last.start_time - entry.start_time).abs() < 0.05 {
                 last.translations.push(entry.text);
                 // 取更长的结束时间 (双语行通常一致)
-                if entry.end_time.map_or(false, |e| {
-                    last.end_time.map_or(true, |le| e > le)
-                }) {
+                if entry
+                    .end_time
+                    .is_some_and(|e| last.end_time.is_none_or(|le| e > le))
+                {
                     last.end_time = entry.end_time;
                 }
                 continue;
@@ -479,7 +487,11 @@ fn apply_enhanced_anchor_timings(line: &mut LyricLine, anchors: &[(usize, f32)],
     let n_groups = starts.len();
     for g in 0..n_groups {
         let g_start = starts[g];
-        let g_end = if g + 1 < n_groups { starts[g + 1] } else { line_end };
+        let g_end = if g + 1 < n_groups {
+            starts[g + 1]
+        } else {
+            line_end
+        };
         if g_end <= g_start {
             continue;
         }
@@ -487,7 +499,10 @@ fn apply_enhanced_anchor_timings(line: &mut LyricLine, anchors: &[(usize, f32)],
         if idxs.is_empty() {
             continue;
         }
-        let weights: Vec<f32> = idxs.iter().map(|&k| token_weight(&line.tokens[k].text)).collect();
+        let weights: Vec<f32> = idxs
+            .iter()
+            .map(|&k| token_weight(&line.tokens[k].text))
+            .collect();
         let total: f32 = weights.iter().sum::<f32>().max(1e-3);
         let mut cur = g_start;
         for (&k, &w) in idxs.iter().zip(&weights) {
@@ -533,7 +548,10 @@ pub fn distribute_token_times(lines: &mut [LyricLine]) {
             None => continue,
         };
         // enhanced LRC 自带的逐字时间不动
-        if line.tokens.iter().all(|t| t.start_time.is_some() && t.end_time.is_some())
+        if line
+            .tokens
+            .iter()
+            .all(|t| t.start_time.is_some() && t.end_time.is_some())
             && !line.token_timing_auto
         {
             continue;
@@ -574,7 +592,10 @@ pub fn align_token_times(lines: &mut [LyricLine], track: &PitchTrack, params: &T
         }
         // 已有逐字时间且非自动估计 (如 enhanced LRC) → 不重新估计;
         // 自动估计过的时间在音轨更新后 (重新分析) 需要重新对齐
-        if line.tokens.iter().all(|t| t.start_time.is_some() && t.end_time.is_some())
+        if line
+            .tokens
+            .iter()
+            .all(|t| t.start_time.is_some() && t.end_time.is_some())
             && !line.token_timing_auto
         {
             continue;
@@ -661,6 +682,7 @@ fn build_align_units(line: &LyricLine) -> Vec<AlignUnit> {
 ///   - 搜索窗口为整行, 不裁剪到 voiced 区域 (无声化/促音也有语言边界信息)
 ///
 /// 返回 false 时由调用方回退加权均匀分配。
+#[allow(clippy::needless_range_loop)] // DP 的 (k, j) 二维索引是算法本体
 fn dp_align_line(
     line: &mut LyricLine,
     track: &PitchTrack,
@@ -725,7 +747,10 @@ fn dp_align_line(
 
     // 行内谱通量自适应阈值
     let flux_mean = if !track.flux.is_empty() {
-        let sum: f32 = fidx.iter().filter_map(|&i| track.flux.get(i).copied()).sum();
+        let sum: f32 = fidx
+            .iter()
+            .filter_map(|&i| track.flux.get(i).copied())
+            .sum();
         sum / fidx.len() as f32
     } else {
         0.0
@@ -734,7 +759,9 @@ fn dp_align_line(
     let weights: Vec<f32> = units.iter().map(|u| u.weight).collect();
     let total_w: f32 = weights.iter().sum::<f32>().max(1.0);
     let ideal_unit = total_dur / total_w;
-    let min_dur = (params.min_token_duration_ms / 1000.0).min(ideal_unit).max(0.02);
+    let min_dur = (params.min_token_duration_ms / 1000.0)
+        .min(ideal_unit)
+        .max(0.02);
 
     // 边界得分: 纯声学证据, 与音高解耦
     let boundary_score = |fi: usize| -> f32 {
@@ -909,6 +936,15 @@ const DOMINANT_NOTE_RATIO: f32 = 0.65;
 /// - 全部候选保留在 pitch_notes (转音 melisma 可见), primary_note 仅是紧凑显示的代表;
 /// - 无候选时给出 UnpitchedReason (区分物理无声与对齐失败);
 /// - 旧工程无 NoteEvent 时回退帧级分段。
+///
+/// - 候选发现与正式准入拆开: 零真实重叠的邻近事件绝不产生正式 badge;
+/// - 动态准入门槛: overlap >= clamp(0.25*min(token,note), 10ms, 30ms)
+///   且 (r_token >= 0.12 或 r_note >= 0.12);
+/// - 优先在 mora 层 many-to-many 绑定 (NoteBinding 真实落盘), 再聚合到显示 token;
+/// - primary = 真实覆盖时长 x 置信度 x 稳定度 最大的已准入事件,
+///   不再使用重叠几何软分的第一名;
+/// - 无准入候选时给出 UnpitchedReason (区分物理无声与对齐失败);
+/// - 旧工程无 NoteEvent 时回退帧级分段。
 pub fn bind_pitch_to_tokens(
     lines: &mut [LyricLine],
     pitch_track: &PitchTrack,
@@ -919,20 +955,19 @@ pub fn bind_pitch_to_tokens(
         return;
     }
     let min_dur = note_tracking.min_note_duration_ms / 1000.0;
-    const CAND_TOL: f32 = 0.03;
+    let has_events = !pitch_track.note_events.is_empty();
 
     for line in lines.iter_mut() {
-        for token in &mut line.tokens {
-            let (t_start, t_end) = match (token.start_time, token.end_time) {
-                (Some(s), Some(e)) => (s, e),
-                _ => {
-                    token.unpitched_reason = Some(UnpitchedReason::AlignmentMissing);
-                    continue;
-                }
-            };
-
-            if pitch_track.note_events.is_empty() {
-                // 旧工程回退: 帧级分段 (无中心裁剪)
+        if !has_events {
+            // 旧工程回退: 帧级分段
+            for token in &mut line.tokens {
+                let (t_start, t_end) = match (token.start_time, token.end_time) {
+                    (Some(s), Some(e)) => (s, e),
+                    _ => {
+                        token.unpitched_reason = Some(UnpitchedReason::AlignmentMissing);
+                        continue;
+                    }
+                };
                 token.pitch_notes =
                     frame_segment_notes(pitch_track, t_start, t_end, confidence_threshold);
                 token.primary_note =
@@ -940,74 +975,202 @@ pub fn bind_pitch_to_tokens(
                 if token.primary_note.is_none() {
                     token.unpitched_reason = Some(UnpitchedReason::NoOverlappingNote);
                 }
-                continue;
             }
-
-            // 一次遍历: 记录 (真实重叠评分, 容差重叠信息)
-            let token_len = (t_end - t_start).max(1e-3);
-            struct Cand {
-                idx: usize,
-                score: f32,
-            }
-            let mut real_cands: Vec<Cand> = Vec::new();
-            let mut tol_cands: Vec<Cand> = Vec::new();
-            for (i, ev) in pitch_track.note_events.iter().enumerate() {
-                // 容差窗口 (仅候选发现)
-                let ov_start = ev.start.max(t_start - CAND_TOL);
-                let ov_end = ev.end.min(t_end + CAND_TOL);
-                if ov_end - ov_start <= 0.0 {
-                    continue;
-                }
-                // 真实重叠 (评分依据)
-                let rs = ev.start.max(t_start);
-                let re_ = ev.end.min(t_end);
-                let ov_real = (re_ - rs).max(0.0);
-                if ov_real > 0.0 {
-                    let r_tok = ov_real / token_len;
-                    let r_note = ov_real / (ev.end - ev.start).max(1e-3);
-                    let score = 0.55 * r_tok + 0.30 * r_note + 0.15 * ev.confidence;
-                    real_cands.push(Cand { idx: i, score });
-                } else {
-                    // 零真实重叠: 只有置信度分量, 排在一切有真实重叠的候选之后
-                    let score = 0.15 * ev.confidence;
-                    tol_cands.push(Cand { idx: i, score });
-                }
-            }
-
-            if real_cands.is_empty() {
-                // 允许纯容差候选 (边界误差几十 ms 的兜底), 但没有就明确标注原因
-                if tol_cands.is_empty() {
-                    token.unpitched_reason = Some(unpitched_reason_for(
-                        pitch_track,
-                        t_start,
-                        t_end,
-                        confidence_threshold,
-                    ));
-                } else {
-                    tol_cands.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
-                    let best = &tol_cands[0];
-                    let ev = &pitch_track.note_events[best.idx];
-                    token.pitch_notes = vec![note_event_to_pitch_note(ev, t_start, t_end)];
-                    token.primary_note = Some(token.pitch_notes[0].clone());
-                    token.unpitched_reason = None;
-                }
-                continue;
-            }
-
-            real_cands.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
-            token.pitch_notes = real_cands
-                .iter()
-                .map(|c| {
-                    let ev = &pitch_track.note_events[c.idx];
-                    let rs = ev.start.max(t_start);
-                    let re_ = ev.end.min(t_end);
-                    note_event_to_pitch_note(ev, rs, re_)
-                })
-                .collect();
-            // primary = 软评分最高者 (时长×重叠占比×置信度的综合)
-            token.primary_note = Some(token.pitch_notes[0].clone());
-            token.unpitched_reason = None;
+            continue;
         }
+
+        let mora_timing = line.moras.iter().any(|m| m.start_time.is_some());
+        if mora_timing {
+            // B2: mora 层 many-to-many 绑定 -> 聚合到 token
+            bind_line_at_mora_level(line, pitch_track, confidence_threshold);
+        } else {
+            bind_line_at_token_level(line, pitch_track, confidence_threshold);
+        }
+    }
+}
+
+/// 动态准入门槛 (任务书 4.2)
+fn admission_min_overlap(window: f32, note: f32) -> f32 {
+    (0.25 * window.min(note)).clamp(0.010, 0.030)
+}
+
+/// 单窗口的候选准入: 返回 (event_idx, 真实重叠, r_token, r_note, score)
+fn admit_events_for_window(
+    events: &[NoteEvent],
+    w_start: f32,
+    w_end: f32,
+) -> Vec<(usize, f32, f32, f32, f32)> {
+    let window = (w_end - w_start).max(1e-3);
+    let mut out = Vec::new();
+    for (i, ev) in events.iter().enumerate() {
+        let rs = ev.start.max(w_start);
+        let re_ = ev.end.min(w_end);
+        let ov = (re_ - rs).max(0.0);
+        if ov <= 0.0 {
+            continue; // 零真实重叠: 不准入 (debug 近邻建议不进入正式绑定)
+        }
+        let note_dur = ev.duration().max(1e-3);
+        let r_tok = ov / window;
+        let r_note = ov / note_dur;
+        let min_ov = admission_min_overlap(window, note_dur);
+        if ov < min_ov {
+            continue;
+        }
+        if r_tok < 0.12 && r_note < 0.12 {
+            continue;
+        }
+        let score = 0.55 * r_tok + 0.30 * r_note + 0.15 * ev.confidence;
+        out.push((i, ov, r_tok, r_note, score));
+    }
+    out
+}
+
+/// primary 选择: 真实覆盖时长 x 置信度 x 稳定度 (4.4)
+fn primary_score(ev: &NoteEvent, ov_real: f32) -> f32 {
+    let stability = if ev.duration() > 1e-3 && ev.stable_duration > 0.0 {
+        (ev.stable_duration / ev.duration()).clamp(0.5, 1.0)
+    } else {
+        1.0
+    };
+    ov_real * ev.confidence * stability
+}
+
+/// mora 层绑定 (优先): mora 时间来自 DP 对齐, 绑定结果落盘到
+/// mora.note_bindings, 再聚合出 token 的 pitch_notes / primary_note。
+fn bind_line_at_mora_level(
+    line: &mut LyricLine,
+    pitch_track: &PitchTrack,
+    confidence_threshold: f32,
+) {
+    // 1. 每个 mora 独立准入
+    for mora in line.moras.iter_mut() {
+        mora.note_bindings.clear();
+        let (Some(ms), Some(me)) = (mora.start_time, mora.end_time) else {
+            continue;
+        };
+        let cands = admit_events_for_window(&pitch_track.note_events, ms, me);
+        for (idx, ov, r_tok, r_note, score) in cands {
+            mora.note_bindings.push(crate::models::NoteBinding {
+                note_event_index: idx,
+                overlap_ms: ov * 1000.0,
+                overlap_ratio_token: r_tok,
+                overlap_ratio_note: r_note,
+                score,
+            });
+        }
+    }
+
+    // 2. 聚合到 token: 取其 char 区间覆盖的 moras 的绑定并集
+    let mora_bindings: Vec<Vec<crate::models::NoteBinding>> =
+        line.moras.iter().map(|m| m.note_bindings.clone()).collect();
+    let mora_spans: Vec<(usize, usize)> = line
+        .moras
+        .iter()
+        .map(|m| (m.char_start, m.char_end))
+        .collect();
+
+    for token in line.tokens.iter_mut() {
+        if token.start_time.is_none() || token.end_time.is_none() {
+            token.unpitched_reason = Some(UnpitchedReason::AlignmentMissing);
+            continue;
+        }
+        // token 覆盖的 moras
+        let mut event_best: std::collections::HashMap<usize, f32> =
+            std::collections::HashMap::new();
+        for (mi, (ms, me)) in mora_spans.iter().enumerate() {
+            if token.char_start >= *me || *ms >= token.char_end {
+                continue;
+            }
+            for b in &mora_bindings[mi] {
+                let e = event_best.entry(b.note_event_index).or_insert(0.0);
+                *e += b.overlap_ms / 1000.0;
+            }
+        }
+        // 无 mora 覆盖的 token (纯汉字/拉丁) 或部分覆盖: 并入 token 级准入。
+        // 同一事件在两层都有时取 max (避免重复计入重叠)。
+        let t_start0 = token.start_time.unwrap();
+        let t_end0 = token.end_time.unwrap();
+        for (idx, ov, _, _, _) in
+            admit_events_for_window(&pitch_track.note_events, t_start0, t_end0)
+        {
+            let e = event_best.entry(idx).or_insert(0.0);
+            if *e < ov {
+                *e = ov;
+            }
+        }
+        if event_best.is_empty() {
+            token.pitch_notes.clear();
+            token.primary_note = None;
+            token.unpitched_reason = Some(unpitched_reason_for(
+                pitch_track,
+                token.start_time.unwrap(),
+                token.end_time.unwrap(),
+                confidence_threshold,
+            ));
+            continue;
+        }
+        // 按 token 窗口内的真实覆盖构造 PitchNote, primary 按覆盖x置信x稳定
+        let t_start = token.start_time.unwrap();
+        let t_end = token.end_time.unwrap();
+        let mut notes: Vec<PitchNote> = Vec::new();
+        let mut scores: Vec<f32> = Vec::new();
+        for (idx, total_ov) in event_best {
+            let ev = &pitch_track.note_events[idx];
+            let rs = ev.start.max(t_start);
+            let re_ = ev.end.min(t_end);
+            notes.push(note_event_to_pitch_note(ev, rs, re_));
+            scores.push(primary_score(ev, total_ov));
+        }
+        let mut order: Vec<usize> = (0..notes.len()).collect();
+        order.sort_by(|&a, &b| scores[b].partial_cmp(&scores[a]).unwrap_or(Ordering::Equal));
+        let primary = order[0];
+        token.pitch_notes = notes;
+        token.primary_note = Some(token.pitch_notes[primary].clone());
+        token.unpitched_reason = None;
+    }
+}
+
+/// token 层直接绑定 (无 mora 时间时: 纯汉字/拉丁/中文行)
+fn bind_line_at_token_level(
+    line: &mut LyricLine,
+    pitch_track: &PitchTrack,
+    confidence_threshold: f32,
+) {
+    for token in line.tokens.iter_mut() {
+        let (t_start, t_end) = match (token.start_time, token.end_time) {
+            (Some(s), Some(e)) => (s, e),
+            _ => {
+                token.unpitched_reason = Some(UnpitchedReason::AlignmentMissing);
+                continue;
+            }
+        };
+        let cands = admit_events_for_window(&pitch_track.note_events, t_start, t_end);
+        if cands.is_empty() {
+            token.pitch_notes.clear();
+            token.primary_note = None;
+            token.unpitched_reason = Some(unpitched_reason_for(
+                pitch_track,
+                t_start,
+                t_end,
+                confidence_threshold,
+            ));
+            continue;
+        }
+        let mut notes: Vec<PitchNote> = Vec::new();
+        let mut scores: Vec<f32> = Vec::new();
+        for (idx, ov, _, _, _) in &cands {
+            let ev = &pitch_track.note_events[*idx];
+            let rs = ev.start.max(t_start);
+            let re_ = ev.end.min(t_end);
+            notes.push(note_event_to_pitch_note(ev, rs, re_));
+            scores.push(primary_score(ev, *ov));
+        }
+        let mut order: Vec<usize> = (0..notes.len()).collect();
+        order.sort_by(|&a, &b| scores[b].partial_cmp(&scores[a]).unwrap_or(Ordering::Equal));
+        let primary = order[0];
+        token.pitch_notes = notes;
+        token.primary_note = Some(token.pitch_notes[primary].clone());
+        token.unpitched_reason = None;
     }
 }
 
@@ -1094,7 +1257,9 @@ pub fn select_primary_note(
 ) -> Option<PitchNote> {
     let filtered = notes
         .iter()
-        .filter(|n| (n.end_time - n.start_time) >= min_duration && n.confidence_mean >= min_confidence)
+        .filter(|n| {
+            (n.end_time - n.start_time) >= min_duration && n.confidence_mean >= min_confidence
+        })
         .max_by(|a, b| score_cmp(a, b));
     match filtered {
         Some(n) => Some(n.clone()),
@@ -1144,8 +1309,16 @@ fn segment_pitch_notes(
             .filter(|(m, _)| (**m - dominant_label as f32).abs() <= 0.75)
             .map(|(_, c)| *c)
             .collect();
-        let core_midis = if core_midis.is_empty() { midis.to_vec() } else { core_midis };
-        let core_conf = if core_conf.is_empty() { confidences.to_vec() } else { core_conf };
+        let core_midis = if core_midis.is_empty() {
+            midis.to_vec()
+        } else {
+            core_midis
+        };
+        let core_conf = if core_conf.is_empty() {
+            confidences.to_vec()
+        } else {
+            core_conf
+        };
         return vec![make_pitch_note(
             token_start,
             token_end,
@@ -1168,11 +1341,18 @@ fn segment_pitch_notes(
         }
         let note_start = token_start.max(times[*start_idx]);
         let note_end = token_end.min(times[*end_idx - 1] + hop);
-        notes.push(make_pitch_note(note_start, note_end, run_midis, run_conf, run_midis.len()));
+        notes.push(make_pitch_note(
+            note_start,
+            note_end,
+            run_midis,
+            run_conf,
+            run_midis.len(),
+        ));
     }
     merge_adjacent_notes(notes)
 }
 
+#[allow(clippy::needless_range_loop)] // run 填充按索引定位
 fn remove_short_label_runs(labels: &[i32]) -> Vec<i32> {
     let mut cleaned = labels.to_vec();
     let runs = label_runs(&cleaned);
@@ -1182,13 +1362,21 @@ fn remove_short_label_runs(labels: &[i32]) -> Vec<i32> {
             continue;
         }
         let prev_label = if i > 0 { Some(runs[i - 1].2) } else { None };
-        let next_label = if i + 1 < runs.len() { Some(runs[i + 1].2) } else { None };
+        let next_label = if i + 1 < runs.len() {
+            Some(runs[i + 1].2)
+        } else {
+            None
+        };
         let fill = match (prev_label, next_label) {
             (Some(p), Some(n)) if p == n => p,
             (Some(p), Some(n)) => {
                 let prev_len = runs[i - 1].1 - runs[i - 1].0;
                 let next_len = runs[i + 1].1 - runs[i + 1].0;
-                if prev_len >= next_len { p } else { n }
+                if prev_len >= next_len {
+                    p
+                } else {
+                    n
+                }
             }
             (Some(p), None) => p,
             (None, Some(n)) => n,
@@ -1269,8 +1457,16 @@ fn iqr_filter(values: &[f32]) -> Vec<f32> {
     }
     let lo = p25 - 0.5 * iqr;
     let hi = p75 + 0.5 * iqr;
-    let filtered: Vec<f32> = values.iter().filter(|&&v| v >= lo && v <= hi).copied().collect();
-    if filtered.is_empty() { values.to_vec() } else { filtered }
+    let filtered: Vec<f32> = values
+        .iter()
+        .filter(|&&v| v >= lo && v <= hi)
+        .copied()
+        .collect();
+    if filtered.is_empty() {
+        values.to_vec()
+    } else {
+        filtered
+    }
 }
 
 fn merge_adjacent_notes(notes: Vec<PitchNote>) -> Vec<PitchNote> {
@@ -1304,7 +1500,7 @@ fn median(values: &[f32]) -> f32 {
     let mut s = values.to_vec();
     s.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = s.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (s[n / 2 - 1] + s[n / 2]) / 2.0
     } else {
         s[n / 2]

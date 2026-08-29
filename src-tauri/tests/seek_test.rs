@@ -7,8 +7,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use rodio::source::Source;
 use pitch_analyzer_tauri_lib::playback::SymphoniaSource;
+use rodio::source::Source;
 
 fn find_song() -> Option<PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

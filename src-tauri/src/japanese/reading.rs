@@ -10,8 +10,8 @@
 //   - 歌曲特殊读法 (運命→さだめ) 通过 ReadingOverride 接口覆盖词典结果
 //   - 本文件预留 override 接口与 provider trait, 词典接入不改变下游数据模型
 
-use crate::models::ReadingSpan;
 use crate::japanese::mora;
+use crate::models::ReadingSpan;
 
 /// 日语读音分析器抽象。实现必须无锁可共享 (Send + Sync)。
 pub trait JapaneseReadingProvider: Send + Sync {

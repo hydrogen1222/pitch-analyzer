@@ -20,7 +20,42 @@ pub struct PitchTrack {
     pub flux: Vec<f32>,
 }
 
-/// 离散稳定音符事件 (Annotation Note Track)
+/// 音符内部的音高表现 (不属于新音符): 颤音 / 滑音 / 起音 / 收尾等
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PitchGestureKind {
+    Stable,
+    Vibrato,
+    Glide,
+    Scoop,
+    Fall,
+    Unvoiced,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PitchGesture {
+    pub start: f32,
+    pub end: f32,
+    pub kind: PitchGestureKind,
+    #[serde(default)]
+    pub center_midi: Option<f32>,
+    #[serde(default)]
+    pub from_midi: Option<f32>,
+    #[serde(default)]
+    pub to_midi: Option<f32>,
+    /// 颤音深度 (cents)
+    #[serde(default)]
+    pub depth_cents: Option<f32>,
+    /// 颤音频率 (Hz)
+    #[serde(default)]
+    pub rate_hz: Option<f32>,
+    #[serde(default)]
+    pub confidence: f32,
+}
+
+/// 离散稳定音符事件 (Annotation Note Track)。
+/// v2: 由连续 midi 空间的 stable-plateau 引擎生成, 不再由半音取整驱动;
+///     center_midi 为连续中心, midi 仅是输出时的最近音名。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoteEvent {
     pub start: f32,
@@ -28,6 +63,18 @@ pub struct NoteEvent {
     pub midi: i32,
     pub note_name: String,
     pub confidence: f32,
+    /// v2: 连续稳定中心 (未取整); 旧工程为 None
+    #[serde(default)]
+    pub center_midi: Option<f32>,
+    /// v2: 稳定平台时长 (秒); 旧工程为 0
+    #[serde(default)]
+    pub stable_duration: f32,
+    /// v2: 音内音高表现 (颤音/滑音等), 不构成新音符
+    #[serde(default)]
+    pub gestures: Vec<PitchGesture>,
+    /// 生成器版本 (2 = stable-plateau engine)
+    #[serde(default)]
+    pub tracker_version: u32,
 }
 
 impl NoteEvent {
@@ -36,19 +83,47 @@ impl NoteEvent {
     }
 }
 
-/// Note Tracker 参数集中管理，避免散落 magic numbers
+/// Note Tracker 参数集中管理，避免散落 magic numbers。
+/// v1 字段保留作 serde 兼容 (部分已被 v2 取代)。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct NoteTrackingParams {
-    /// 新音成为有效音符所需的最短时长
+    /// 最短有效音符时长 (lyrics binder 的 primary 过滤仍使用)
     pub min_note_duration_ms: f32,
-    /// 候选新音需持续该时长才承认切换 (debounce)
+    /// [v1 遗留, v2 不再使用] 候选新音确认时长 (被 confirm_duration_ms 取代)
+    #[serde(default)]
     pub switch_confirm_ms: f32,
-    /// 短于该时长且恰差一个八度 → 视为 octave error
+    /// [v1 遗留, v2 不再使用] 短八度错误上限 (plateau 引擎自然处理)
+    #[serde(default)]
     pub octave_error_max_ms: f32,
-    /// 半音边界 hysteresis (cents)，避免 vibrato 触发闪烁
+    /// [v1 遗留, v2 不再使用] 名义半音滞回 (v2 用连续 cents 滞回取代)
+    #[serde(default)]
     pub semitone_hysteresis_cents: f32,
     /// 绑定时忽略 token 首尾的极短 margin
+    #[serde(default)]
     pub edge_ignore_ms: f32,
+
+    // ── v2 stable-plateau engine (连续 cents 空间) ──
+    /// 稳定半径: 中心 ±stay 内绝不因取整变化换音
+    #[serde(default = "default_stay_radius_cents")]
+    pub stay_radius_cents: f32,
+    /// 切换偏离: 超过此偏离才开始收集新目标候选
+    #[serde(default = "default_switch_deviation_cents")]
+    pub switch_deviation_cents: f32,
+    /// 确认新目标所需的最小音程分离
+    #[serde(default = "default_switch_separation_cents")]
+    pub switch_separation_cents: f32,
+    /// 常规新音确认时长
+    #[serde(default = "default_confirm_duration_ms")]
+    pub confirm_duration_ms: f32,
+    /// 短倚音保留的最短时长 (配合高置信/明显音程)
+    #[serde(default = "default_appoggiatura_min_ms")]
+    pub appoggiatura_min_ms: f32,
+    /// 候选平台的稳定度上限 (MAD, cents)
+    #[serde(default = "default_candidate_max_mad_cents")]
+    pub candidate_max_mad_cents: f32,
+    /// 可桥接的无声间隙 (帧, 10ms/帧)
+    #[serde(default = "default_bridge_gap_frames")]
+    pub bridge_gap_frames: usize,
 }
 
 impl Default for NoteTrackingParams {
@@ -59,8 +134,37 @@ impl Default for NoteTrackingParams {
             octave_error_max_ms: 80.0,
             semitone_hysteresis_cents: 25.0,
             edge_ignore_ms: 20.0,
+            stay_radius_cents: default_stay_radius_cents(),
+            switch_deviation_cents: default_switch_deviation_cents(),
+            switch_separation_cents: default_switch_separation_cents(),
+            confirm_duration_ms: default_confirm_duration_ms(),
+            appoggiatura_min_ms: default_appoggiatura_min_ms(),
+            candidate_max_mad_cents: default_candidate_max_mad_cents(),
+            bridge_gap_frames: default_bridge_gap_frames(),
         }
     }
+}
+
+fn default_stay_radius_cents() -> f32 {
+    40.0
+}
+fn default_switch_deviation_cents() -> f32 {
+    70.0
+}
+fn default_switch_separation_cents() -> f32 {
+    80.0
+}
+fn default_confirm_duration_ms() -> f32 {
+    70.0
+}
+fn default_appoggiatura_min_ms() -> f32 {
+    45.0
+}
+fn default_candidate_max_mad_cents() -> f32 {
+    25.0
+}
+fn default_bridge_gap_frames() -> usize {
+    3
 }
 
 #[derive(Debug, Clone)]
@@ -117,8 +221,10 @@ impl Default for AnalysisParams {
 impl AnalysisParams {
     /// 转为 analyzer 配置
     pub fn to_analyzer_config(&self) -> AnalyzerConfig {
-        let mut note_tracking = NoteTrackingParams::default();
-        note_tracking.min_note_duration_ms = self.min_note_duration_ms;
+        let note_tracking = NoteTrackingParams {
+            min_note_duration_ms: self.min_note_duration_ms,
+            ..Default::default()
+        };
         AnalyzerConfig {
             confidence_threshold: self.confidence_threshold,
             fmin: self.fmin,
@@ -207,15 +313,30 @@ pub struct ReadingSpan {
 }
 
 /// 一个莫拉 (拍)。时间与音高绑定在对齐阶段回填。
+///
+/// display 映射规则 (任务书 5.3): kana-only 路径 reading == surface, char 区间精确;
+/// 词典读音 (reading != surface) 时 char 区间为整个 ReadingSpan 的 surface span
+/// (coarse) —— 熟字训/多字词不存在"这个 mora 对应哪个汉字"的唯一答案, 不伪造映射。
+/// 精确定位用 reading_offset_* (读音文本内的下标)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoraUnit {
     pub kana: String,
     pub phonemes: Vec<String>,
     /// 所属 ReadingSpan 在 line.reading_spans 中的下标
     pub reading_span_id: usize,
-    /// 原文 char 区间
+    /// 原文 char 区间 (kana-only: 精确; 词典读音: 粗粒度 = 整个 span 的 surface 区间)
     pub char_start: usize,
     pub char_end: usize,
+    /// 在 span 读音文本内的 char 区间 (始终精确)
+    #[serde(default)]
+    pub reading_offset_start: usize,
+    #[serde(default)]
+    pub reading_offset_end: usize,
+    /// surface 上的显示区间 (可覆盖多个字)
+    #[serde(default)]
+    pub display_start: usize,
+    #[serde(default)]
+    pub display_end: usize,
     #[serde(default)]
     pub start_time: Option<f32>,
     #[serde(default)]
@@ -336,10 +457,16 @@ pub struct ProjectData {
 
 /// MIDI → 音名 (C4 / F#4 ...)，NaN → "---"
 pub fn midi_to_note_name(midi: f32) -> String {
-    let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    let names = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
     if midi.is_nan() {
         return "---".to_string();
     }
     let m = midi.round() as i32;
-    format!("{}{}", names[m.rem_euclid(12) as usize], m.div_euclid(12) - 1)
+    format!(
+        "{}{}",
+        names[m.rem_euclid(12) as usize],
+        m.div_euclid(12) - 1
+    )
 }

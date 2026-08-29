@@ -108,12 +108,15 @@ impl SymphoniaSource {
         if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
             hint.with_extension(ext);
         }
-        let mss = MediaSourceStream::new(
-            Box::new(FileMediaSource { file, len }),
-            Default::default(),
-        );
+        let mss =
+            MediaSourceStream::new(Box::new(FileMediaSource { file, len }), Default::default());
         let probed = symphonia::default::get_probe()
-            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+            .format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
             .map_err(|e| format!("识别音频格式失败: {}", e))?;
 
         let track = probed
@@ -258,16 +261,13 @@ impl AudioPlayer {
                 match cmd {
                     Cmd::Load(path, reply) => {
                         let result = load_sink(&handle, &path, 0.0, volume, true, &mut sink);
-                        match &result {
-                            Ok(d) => {
-                                current_path = Some(path);
-                                let mut s = state_for_thread.lock().unwrap();
-                                s.duration = *d;
-                                s.accumulated_secs = 0.0;
-                                s.playback_start = None;
-                                s.is_playing = false;
-                            }
-                            Err(_) => {}
+                        if let Ok(d) = &result {
+                            current_path = Some(path);
+                            let mut s = state_for_thread.lock().unwrap();
+                            s.duration = *d;
+                            s.accumulated_secs = 0.0;
+                            s.playback_start = None;
+                            s.is_playing = false;
                         }
                         let _ = reply.send(result);
                     }
@@ -280,7 +280,11 @@ impl AudioPlayer {
                                 let within = st.accumulated_secs > 0.05
                                     && (st.duration <= 0.0
                                         || st.accumulated_secs < st.duration - 0.05);
-                                if within { st.accumulated_secs } else { 0.0 }
+                                if within {
+                                    st.accumulated_secs
+                                } else {
+                                    0.0
+                                }
                             };
                             let path = current_path.clone();
                             if let Some(path) = path {
@@ -329,14 +333,9 @@ impl AudioPlayer {
                         }
                         if !ok {
                             if let Some(path) = current_path.clone() {
-                                if let Ok(d) = load_sink(
-                                    &handle,
-                                    &path,
-                                    secs,
-                                    volume,
-                                    !was_playing,
-                                    &mut sink,
-                                ) {
+                                if let Ok(d) =
+                                    load_sink(&handle, &path, secs, volume, !was_playing, &mut sink)
+                                {
                                     let mut st = state_for_thread.lock().unwrap();
                                     st.duration = d;
                                     ok = true;
@@ -381,11 +380,15 @@ impl AudioPlayer {
     }
 
     pub fn play(&self) -> Result<(), String> {
-        self.tx.send(Cmd::Play).map_err(|_| "播放线程已停止".to_string())
+        self.tx
+            .send(Cmd::Play)
+            .map_err(|_| "播放线程已停止".to_string())
     }
 
     pub fn pause(&self) -> Result<(), String> {
-        self.tx.send(Cmd::Pause).map_err(|_| "播放线程已停止".to_string())
+        self.tx
+            .send(Cmd::Pause)
+            .map_err(|_| "播放线程已停止".to_string())
     }
 
     pub fn seek(&self, secs: f32) -> Result<(), String> {
@@ -428,7 +431,10 @@ fn load_sink(
     sink_slot: &mut Option<Sink>,
 ) -> Result<f32, String> {
     let mut source = SymphoniaSource::open(Path::new(path))?;
-    let duration = source.total_duration().map(|d| d.as_secs_f32()).unwrap_or(0.0);
+    let duration = source
+        .total_duration()
+        .map(|d| d.as_secs_f32())
+        .unwrap_or(0.0);
     if secs > 0.05 {
         let _ = source.try_seek(Duration::from_secs_f32(secs));
     }

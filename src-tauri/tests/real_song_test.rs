@@ -19,7 +19,10 @@ use pitch_analyzer_tauri_lib::models::{AnalysisParams, NoteTrackingParams, Pitch
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
 fn find_songs() -> Vec<PathBuf> {
@@ -72,8 +75,7 @@ fn count_transient_spikes(midis: &[f32], max_gap: usize, jump: f32) -> usize {
             }
             if (v - base).abs() > jump {
                 // 大跳: 看之后是否很快回到 base (毛刺) 或稳定在新音 (真实换音)
-                for k in (j + 1)..((j + 1 + max_gap).min(n)) {
-                    let w = midis[k];
+                for w in midis[(j + 1)..((j + 1 + max_gap).min(n))].iter() {
                     if w.is_nan() {
                         continue;
                     }
@@ -115,7 +117,7 @@ fn count_isolated_voiced_islands(midis: &[f32], max_len: usize) -> usize {
         let e = i - 1;
         let isolated_left = s == 0 || midis[s - 1].is_nan();
         let isolated_right = e + 1 >= n || midis[e + 1].is_nan();
-        if isolated_left && isolated_right && e - s + 1 <= max_len {
+        if isolated_left && isolated_right && e - s < max_len {
             count += 1;
         }
     }
@@ -183,11 +185,11 @@ fn real_songs_acceptance() {
         return;
     }
 
-    let analyzer = PitchAnalyzer::new(model_path.to_str().unwrap(), cent_table).expect("load model");
+    let analyzer =
+        PitchAnalyzer::new(model_path.to_str().unwrap(), cent_table).expect("load model");
     let note_params = NoteTrackingParams::default();
 
-    let mut song_idx = 0usize;
-    for song in &songs {
+    for (song_idx, song) in songs.iter().enumerate() {
         let name = song.file_name().unwrap().to_string_lossy().to_string();
         println!("\n=== {} ===", name);
         let t0 = std::time::Instant::now();
@@ -206,7 +208,11 @@ fn real_songs_acceptance() {
             voiced.len(),
             voiced_ratio * 100.0
         );
-        assert!(voiced_ratio > 0.03, "voiced ratio too low: {:.2}", voiced_ratio);
+        assert!(
+            voiced_ratio > 0.03,
+            "voiced ratio too low: {:.2}",
+            voiced_ratio
+        );
 
         // MIDI 值域
         let mut midis_v: Vec<f32> = voiced.iter().map(|&i| track.midis[i]).collect();
@@ -226,7 +232,11 @@ fn real_songs_acceptance() {
             .enumerate()
             .filter(|(_, e)| e.duration() < min_dur_ms / 1000.0 * 0.9)
             .map(|(i, e)| {
-                let prev = if i > 0 { Some(events[i - 1].midi) } else { None };
+                let prev = if i > 0 {
+                    Some(events[i - 1].midi)
+                } else {
+                    None
+                };
                 let next = events.get(i + 1).map(|e| e.midi);
                 println!(
                     "    short event: midi={} dur={:.1}ms start={:.2} prev={:?} next={:?}",
@@ -244,7 +254,13 @@ fn real_songs_acceptance() {
                     let hi = ((s_idx + 25) as usize).min(track.midis.len());
                     let seq: Vec<String> = track.midis[lo..hi]
                         .iter()
-                        .map(|m| if m.is_nan() { "·".to_string() } else { format!("{:.2}", m) })
+                        .map(|m| {
+                            if m.is_nan() {
+                                "·".to_string()
+                            } else {
+                                format!("{:.2}", m)
+                            }
+                        })
                         .collect();
                     println!("    frames[{}..{}]: {}", lo, hi, seq.join(" "));
                     let slice_times: Vec<f32> = (lo..hi).map(|k| k as f32 * 0.01).collect();
@@ -283,11 +299,17 @@ fn real_songs_acceptance() {
 
         let oct_roundtrips = count_octave_roundtrips(events);
         println!("  octave roundtrip events (<80ms): {}", oct_roundtrips);
-        assert_eq!(oct_roundtrips, 0, "octave roundtrip events must be suppressed");
+        assert_eq!(
+            oct_roundtrips, 0,
+            "octave roundtrip events must be suppressed"
+        );
 
         // Clean Pitch 层: ≤80ms 快速大跳往返
         let spikes = count_transient_spikes(&track.midis, 8, 6.0);
-        println!("  clean-track transient spikes (<=80ms roundtrip >6 semi): {}", spikes);
+        println!(
+            "  clean-track transient spikes (<=80ms roundtrip >6 semi): {}",
+            spikes
+        );
         assert_eq!(spikes, 0, "transient pitch spikes must be cleaned");
 
         // 残余细抖动统计 (观察指标, 暂不强制)
@@ -321,7 +343,11 @@ fn real_songs_acceptance() {
             total_tokens,
             coverage * 100.0
         );
-        assert!(coverage > 0.6, "primary note coverage too low: {:.2}", coverage);
+        assert!(
+            coverage > 0.6,
+            "primary note coverage too low: {:.2}",
+            coverage
+        );
 
         // token 时间单调 + 最小字长
         for line in &lines {
@@ -349,8 +375,6 @@ fn real_songs_acceptance() {
                 println!("  dumped sample: {}", srt_path.display());
             }
         }
-        let _ = song_idx;
-        song_idx += 1;
     }
 }
 
@@ -396,15 +420,22 @@ fn median(v: &mut [f32]) -> f32 {
 // ── 真实 LRC 导入全链路: 解析 → DP 对齐 → 绑定 → 前端逐帧高亮模拟 ──
 
 /// 模拟 KaraokeDisplay.findCurrentLineAndTokenIdx 的查找规则
-fn simulate_display(lines: &[pitch_analyzer_tauri_lib::models::LyricLine], t: f32) -> (usize, usize) {
+fn simulate_display(
+    lines: &[pitch_analyzer_tauri_lib::models::LyricLine],
+    t: f32,
+) -> (usize, usize) {
     for (li, line) in lines.iter().enumerate() {
-        let (Some(ls), Some(le)) = (line.start_time, line.end_time) else { continue };
+        let (Some(ls), Some(le)) = (line.start_time, line.end_time) else {
+            continue;
+        };
         if t < ls || t > le {
             continue;
         }
         let mut tok = -1i64;
         for (i, token) in line.tokens.iter().enumerate() {
-            let (Some(ts), Some(te)) = (token.start_time, token.end_time) else { continue };
+            let (Some(ts), Some(te)) = (token.start_time, token.end_time) else {
+                continue;
+            };
             if t >= ts && t <= te {
                 tok = i as i64;
                 break;
@@ -419,8 +450,9 @@ fn simulate_display(lines: &[pitch_analyzer_tauri_lib::models::LyricLine], t: f3
 #[ignore]
 fn real_lrc_full_chain() {
     pitch_analyzer_tauri_lib::try_init_ort_dylib();
-    let lrc_path = std::env::var("LRC_PATH")
-        .unwrap_or_else(|_| r"C:\Users\tp798\Documents\Lyrics\岡村孝子 - ドラマ (636813).lrc".to_string());
+    let lrc_path = std::env::var("LRC_PATH").unwrap_or_else(|_| {
+        r"C:\Users\tp798\Documents\Lyrics\岡村孝子 - ドラマ (636813).lrc".to_string()
+    });
     let Ok(content) = std::fs::read_to_string(&lrc_path) else {
         eprintln!("Skipping: LRC not found at {}", lrc_path);
         return;
@@ -466,13 +498,23 @@ fn real_lrc_full_chain() {
         let (ls, le) = (line.start_time.unwrap(), line.end_time.unwrap());
         assert!(line.token_timing_auto, "DP/distribute must set timing_auto");
         for w in line.tokens.windows(2) {
-            assert!(w[1].start_time.unwrap() >= w[0].end_time.unwrap() - 1e-4, "token overlap");
+            assert!(
+                w[1].start_time.unwrap() >= w[0].end_time.unwrap() - 1e-4,
+                "token overlap"
+            );
         }
         for t in &line.tokens {
             let (ts, te) = (t.start_time.unwrap(), t.end_time.unwrap());
-            assert!(ts >= ls - 0.2 && te <= le + 0.2, "token outside line bounds");
+            assert!(
+                ts >= ls - 0.2 && te <= le + 0.2,
+                "token outside line bounds"
+            );
             assert!(te - ts >= 0.03, "token too short");
-            assert!(t.text.chars().count() < 20, "token not char-split: {:?}", t.text);
+            assert!(
+                t.text.chars().count() < 20,
+                "token not char-split: {:?}",
+                t.text
+            );
         }
     }
 
@@ -522,15 +564,36 @@ fn real_lrc_full_chain() {
             seen.insert(tok);
             t += 0.05;
         }
-        println!("  line {}: {} tokens, {} highlight states", li, line.tokens.len(), seen.len());
-        assert!(seen.len() >= (line.tokens.len() as f32 * 0.5).floor() as usize, 
+        println!(
+            "  line {}: {} tokens, {} highlight states",
+            li,
+            line.tokens.len(),
+            seen.len()
+        );
+        assert!(
+            seen.len() >= (line.tokens.len() as f32 * 0.5).floor() as usize,
             "token highlight must advance within line {}: {} states for {} tokens",
-            li, seen.len(), line.tokens.len());
+            li,
+            seen.len(),
+            line.tokens.len()
+        );
     }
 
     // 6. 主音覆盖率
     let total: usize = lines.iter().map(|l| l.tokens.len()).sum();
-    let bound: usize = lines.iter().flat_map(|l| &l.tokens).filter(|t| t.primary_note.is_some()).count();
-    println!("primary coverage: {}/{} ({:.0}%)", bound, total, 100.0 * bound as f32 / total as f32);
-    assert!(bound as f32 / total as f32 > 0.5, "primary coverage too low");
+    let bound: usize = lines
+        .iter()
+        .flat_map(|l| &l.tokens)
+        .filter(|t| t.primary_note.is_some())
+        .count();
+    println!(
+        "primary coverage: {}/{} ({:.0}%)",
+        bound,
+        total,
+        100.0 * bound as f32 / total as f32
+    );
+    assert!(
+        bound as f32 / total as f32 > 0.5,
+        "primary coverage too low"
+    );
 }

@@ -28,11 +28,15 @@ fn test_export_srt_with_lyrics() {
 
     // 第一行的 tokens 都应该有 pitch
     let first = &lines[0];
-    assert!(first.tokens.iter().any(|t| !t.pitch_notes.is_empty()),
-            "expected at least one token to have pitch notes");
+    assert!(
+        first.tokens.iter().any(|t| !t.pitch_notes.is_empty()),
+        "expected at least one token to have pitch notes"
+    );
     // primary_note 应被设置
-    assert!(first.tokens.iter().any(|t| t.primary_note.is_some()),
-            "expected primary_note to be set");
+    assert!(
+        first.tokens.iter().any(|t| t.primary_note.is_some()),
+        "expected primary_note to be set"
+    );
 
     let out = std::env::temp_dir().join("test_export.srt");
     export_srt(&track, &lines, &out).unwrap();
@@ -89,8 +93,11 @@ fn test_srt_uses_primary_note_not_first() {
     // 手动调用与后端一致的 primary 选择
     for line in lines.iter_mut() {
         for token in line.tokens.iter_mut() {
-            token.primary_note =
-                pitch_analyzer_tauri_lib::lyrics::select_primary_note(&token.pitch_notes, 0.045, 0.3);
+            token.primary_note = pitch_analyzer_tauri_lib::lyrics::select_primary_note(
+                &token.pitch_notes,
+                0.045,
+                0.3,
+            );
         }
     }
 
@@ -98,6 +105,10 @@ fn test_srt_uses_primary_note_not_first() {
     export_srt(&track, &lines, &out).unwrap();
     let content = std::fs::read_to_string(&out).unwrap();
     println!("SRT primary content:\n{}", content);
-    assert!(content.contains("[C4]"), "expected C4 as primary, got:\n{}", content);
+    assert!(
+        content.contains("[C4]"),
+        "expected C4 as primary, got:\n{}",
+        content
+    );
     assert!(!content.contains("[F5]"), "F5 must not be the display note");
 }

@@ -16,7 +16,10 @@ pub struct FCPEDecoder {
 impl FCPEDecoder {
     pub fn new(cent_table: Vec<f32>) -> Self {
         let out_dims = cent_table.len();
-        Self { cent_table, out_dims }
+        Self {
+            cent_table,
+            out_dims,
+        }
     }
 
     /// latent: (T, out_dims), 返回 (f0, confidence) 每个长度 T

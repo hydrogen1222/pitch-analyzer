@@ -1,20 +1,20 @@
 // 验证 Rust mel + ONNX 推理与 Python 参考数据一致
 
-use pitch_analyzer_tauri_lib::mel::{MelConfig, MelExtractor};
-use pitch_analyzer_tauri_lib::decoder::FCPEDecoder;
-use pitch_analyzer_tauri_lib::audio::load_audio_16k_mono;
-use pitch_analyzer_tauri_lib::dsp::post_process;
 use ndarray::Array3;
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
+use pitch_analyzer_tauri_lib::audio::load_audio_16k_mono;
+use pitch_analyzer_tauri_lib::decoder::FCPEDecoder;
+use pitch_analyzer_tauri_lib::dsp::post_process;
+use pitch_analyzer_tauri_lib::mel::{MelConfig, MelExtractor};
 use serde::Deserialize;
 use std::path::PathBuf;
 
 #[derive(Deserialize)]
 struct TestData {
     wav: Vec<f32>,
-    mel: Vec<Vec<Vec<f32>>>,      // (1, T, 128)
-    latent: Vec<Vec<Vec<f32>>>,   // (1, T, 360)
+    mel: Vec<Vec<Vec<f32>>>,    // (1, T, 128)
+    latent: Vec<Vec<Vec<f32>>>, // (1, T, 360)
 }
 
 /// test_data.json 被 gitignore (需自行用 Python 参考实现生成)。
@@ -126,7 +126,10 @@ fn test_onnx_inference_matches_python() {
         }
     }
     let mean_diff = total_diff / count as f32;
-    println!("latent max_diff: {:.8}, mean_diff: {:.8}", max_diff, mean_diff);
+    println!(
+        "latent max_diff: {:.8}, mean_diff: {:.8}",
+        max_diff, mean_diff
+    );
 
     assert!(max_diff < 1e-4, "latent max_diff too large: {}", max_diff);
 }
@@ -176,12 +179,15 @@ fn test_decoder_produces_f0() {
     println!("total frames: {}, voiced: {}", t, voiced.len());
     if !voiced.is_empty() {
         let avg_f0: f32 = voiced.iter().map(|(_, f)| *f).sum::<f32>() / voiced.len() as f32;
-        println!("avg f0: {:.1} Hz (expected: ~100-800 Hz for vocals)", avg_f0);
+        println!(
+            "avg f0: {:.1} Hz (expected: ~100-800 Hz for vocals)",
+            avg_f0
+        );
     }
 
     // 测试音频是随机的，只有少数帧 voiced 是正常的
     // 主要验证 decoder 不 panic 且输出范围合理
-    assert!(voiced.len() > 0, "no voiced frames at all");
+    assert!(!voiced.is_empty(), "no voiced frames at all");
     for (_, f) in &voiced {
         assert!(*f > 10.0 && *f < 10000.0, "f0 out of range: {}", f);
     }
@@ -221,8 +227,12 @@ fn test_end_to_end_real_audio() {
     println!("加载音频...");
     let t = std::time::Instant::now();
     let audio = load_audio_16k_mono(audio_path).unwrap();
-    println!("解码耗时: {:?}, 样本数: {}, sr={}",
-             t.elapsed(), audio.samples.len(), audio.sample_rate);
+    println!(
+        "解码耗时: {:?}, 样本数: {}, sr={}",
+        t.elapsed(),
+        audio.samples.len(),
+        audio.sample_rate
+    );
 
     // 2. mel
     let t = std::time::Instant::now();
@@ -255,24 +265,30 @@ fn test_end_to_end_real_audio() {
     // 5. post process
     let t = std::time::Instant::now();
     let dummy_rms = vec![1.0; f0.len()];
-    let (times, freqs, midis) = post_process(&f0, &conf, &dummy_rms, 0.3, 0.0, 65.0, 1300.0, 11, 15, false);
+    let (times, freqs, midis) = post_process(
+        &f0, &conf, &dummy_rms, 0.3, 0.0, 65.0, 1300.0, 11, 15, false,
+    );
     println!("Post-process 耗时: {:?}", t.elapsed());
 
     // 统计
     let voiced: Vec<f32> = midis.iter().filter(|m| !m.is_nan()).copied().collect();
-    println!("总帧数: {}, voiced: {} ({:.1}%)",
-             midis.len(), voiced.len(),
-             100.0 * voiced.len() as f32 / midis.len() as f32);
+    println!(
+        "总帧数: {}, voiced: {} ({:.1}%)",
+        midis.len(),
+        voiced.len(),
+        100.0 * voiced.len() as f32 / midis.len() as f32
+    );
     if !voiced.is_empty() {
         let min_midi = voiced.iter().cloned().fold(f32::INFINITY, f32::min);
         let max_midi = voiced.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let avg_midi = voiced.iter().sum::<f32>() / voiced.len() as f32;
-        println!("MIDI 范围: {:.1} ~ {:.1}, 平均: {:.1}",
-                 min_midi, max_midi, avg_midi);
-        let avg_freq = freqs.iter().filter(|f| !f.is_nan()).sum::<f32>()
-            / voiced.len() as f32;
+        println!(
+            "MIDI 范围: {:.1} ~ {:.1}, 平均: {:.1}",
+            min_midi, max_midi, avg_midi
+        );
+        let avg_freq = freqs.iter().filter(|f| !f.is_nan()).sum::<f32>() / voiced.len() as f32;
         println!("平均频率: {:.1} Hz", avg_freq);
-        println!("时长: {:.1} 秒", times[times.len()-1]);
+        println!("时长: {:.1} 秒", times[times.len() - 1]);
     }
 
     assert!(voiced.len() > 100, "太少 voiced 帧");

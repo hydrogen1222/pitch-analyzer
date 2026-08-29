@@ -25,7 +25,10 @@ fn is_small_vowel(c: char) -> bool {
 }
 
 fn is_y_small(c: char) -> bool {
-    matches!(c, '\u{3083}' | '\u{3085}' | '\u{3087}' | '\u{30E3}' | '\u{30E5}' | '\u{30E7}')
+    matches!(
+        c,
+        '\u{3083}' | '\u{3085}' | '\u{3087}' | '\u{30E3}' | '\u{30E5}' | '\u{30E7}'
+    )
 }
 
 fn is_combining_kana(c: char) -> bool {
@@ -100,7 +103,10 @@ mod tests {
 
     #[test]
     fn test_foreign_combinations() {
-        assert_eq!(kanas("ファティシェチェウィ"), vec!["ファ", "ティ", "シェ", "チェ", "ウィ"]);
+        assert_eq!(
+            kanas("ファティシェチェウィ"),
+            vec!["ファ", "ティ", "シェ", "チェ", "ウィ"]
+        );
     }
 
     #[test]

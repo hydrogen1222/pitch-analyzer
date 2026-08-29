@@ -30,6 +30,7 @@ pub fn midi_to_f0(midi: &[f32]) -> Vec<f32> {
 }
 
 /// 完整后处理管线 (对应 analyzer.py finalize)
+#[allow(clippy::too_many_arguments)] // 历史管线签名, 参数均有用途
 pub fn post_process(
     f0: &[f32],
     conf: &[f32],
@@ -56,7 +57,7 @@ pub fn post_process(
 
     // 4. median filter (per segment)
     if median_window > 1 {
-        let w = if median_window % 2 != 0 {
+        let w = if !median_window.is_multiple_of(2) {
             median_window
         } else {
             median_window + 1
@@ -66,7 +67,7 @@ pub fn post_process(
 
     // 5. savgol filter (per segment)
     if savgol_window > 3 {
-        let w = if savgol_window % 2 != 0 {
+        let w = if !savgol_window.is_multiple_of(2) {
             savgol_window
         } else {
             savgol_window + 1
@@ -92,7 +93,14 @@ pub fn post_process(
     (times, final_freqs, midi)
 }
 
-fn stabilize_vocal_midi(midi: &[f32], conf: &[f32], rms: &[f32], conf_threshold: f32, rms_threshold: f32) -> Vec<f32> {
+#[allow(clippy::needless_range_loop)] // DSP 逐帧索引是算法本体
+fn stabilize_vocal_midi(
+    midi: &[f32],
+    conf: &[f32],
+    rms: &[f32],
+    conf_threshold: f32,
+    rms_threshold: f32,
+) -> Vec<f32> {
     let mut out = midi.to_vec();
     // confidence & rms mask
     for i in 0..out.len() {
@@ -122,6 +130,7 @@ fn drop_short_voiced_segments(midi: &mut [f32], min_seg_frames: usize) {
 }
 
 /// 找到所有有 voiced (非 NaN) 的连续段
+#[allow(clippy::needless_range_loop)] // 段边界按帧索引追踪
 fn iter_voiced_segments(midi: &[f32]) -> Vec<(usize, usize)> {
     let mut segs = Vec::new();
     let mut start: Option<usize> = None;
@@ -149,6 +158,7 @@ const MIN_VOICED_SEGMENT_FRAMES: usize = 3;
 /// 边界泛音误差 (八度/十二度/双八度) 允许的最长修正帧数 (150ms)
 const ISLAND_HARMONIC_MAX_FRAMES: usize = 15;
 
+#[allow(clippy::needless_range_loop)] // DSP 逐帧索引是算法本体
 fn remove_short_pitch_islands(
     midi: &[f32],
     conf: &[f32],
@@ -156,6 +166,7 @@ fn remove_short_pitch_islands(
     min_frames: usize,
 ) -> Vec<f32> {
     let mut out = midi.to_vec();
+    #[allow(clippy::needless_range_loop)] // DSP 逐帧索引是算法本体
     for (seg_start, seg_end) in iter_voiced_segments(midi) {
         let seg_len = seg_end - seg_start + 1;
         if seg_len < 3 {
@@ -199,22 +210,24 @@ fn remove_short_pitch_islands(
                 }
                 let cur_conf = nanmean(&conf[rs..=re.min(conf.len() - 1)]);
                 let nbr_conf = nanmean(&conf[nbr_s..=nbr_e.min(conf.len() - 1)]);
-                
+
                 // 常见泛音误差: 八度(12), 十二度(19), 两个八度(24), 甚至更高
-                let is_harmonic = (diff - 12.0).abs() <= 1.5 
-                    || (diff - 19.0).abs() <= 1.5 
-                    || (diff - 24.0).abs() <= 1.5 
+                let is_harmonic = (diff - 12.0).abs() <= 1.5
+                    || (diff - 19.0).abs() <= 1.5
+                    || (diff - 24.0).abs() <= 1.5
                     || (diff - 28.0).abs() <= 1.5;
-                
+
                 // 如果是边界，对于泛音误差我们容忍更长的帧数（比如最多 15 帧 / 150ms）
                 // 对于一般的置信度低的杂音，容忍 min_frames
-                let allowed_len = if is_harmonic { ISLAND_HARMONIC_MAX_FRAMES } else { min_frames };
-                
-                if run_len < allowed_len {
-                    if is_harmonic || cur_conf < nbr_conf {
-                        for j in rs..=re {
-                            out[j] = nbr_med;
-                        }
+                let allowed_len = if is_harmonic {
+                    ISLAND_HARMONIC_MAX_FRAMES
+                } else {
+                    min_frames
+                };
+
+                if run_len < allowed_len && (is_harmonic || cur_conf < nbr_conf) {
+                    for j in rs..=re {
+                        out[j] = nbr_med;
                     }
                 }
                 continue;
@@ -244,9 +257,14 @@ fn remove_short_pitch_islands(
     out
 }
 
+#[allow(clippy::needless_range_loop)] // DSP 逐帧索引是算法本体
 fn apply_hampel_midi(midi: &[f32], window: usize, threshold: f32) -> Vec<f32> {
     let mut out = midi.to_vec();
-    let w = if window % 2 != 0 { window } else { window + 1 };
+    let w = if !window.is_multiple_of(2) {
+        window
+    } else {
+        window + 1
+    };
     let half = w / 2;
 
     for (seg_start, seg_end) in iter_voiced_segments(midi) {
@@ -283,9 +301,7 @@ fn apply_median_midi(midi: &[f32], window: usize) -> Vec<f32> {
         if k >= 3 {
             let seg = &midi[seg_start..=seg_end];
             let filtered = median_filter(seg, k);
-            for i in 0..seg_len {
-                out[seg_start + i] = filtered[i];
-            }
+            out[seg_start..=seg_end].copy_from_slice(&filtered);
         }
     }
     out
@@ -302,9 +318,8 @@ fn apply_savgol_midi(midi: &[f32], window: usize) -> Vec<f32> {
         let filtered = savgol_filter(seg, window, 3);
         // 只写回完整窗口覆盖的帧: 边缘半窗内样本不足, 拟合偏差大, 保留原值
         let half = window / 2;
-        for i in half..seg_len - half {
-            out[seg_start + i] = filtered[i];
-        }
+        out[seg_start + half..seg_start + seg_len - half]
+            .copy_from_slice(&filtered[half..seg_len - half]);
     }
     out
 }
@@ -318,7 +333,7 @@ fn nanmedian(x: &[f32]) -> f32 {
     }
     valid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = valid.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (valid[n / 2 - 1] + valid[n / 2]) / 2.0
     } else {
         valid[n / 2]
@@ -349,6 +364,7 @@ fn median_filter(x: &[f32], k: usize) -> Vec<f32> {
 /// Savitzky-Golay 滤波器 (polyorder=3)
 /// 简化实现: 对有效值做多项式拟合，或直接用卷积系数
 /// 这里用卷积系数法 (与 scipy.signal.savgol_coeffs 一致)
+#[allow(clippy::needless_range_loop)] // 卷积窗口索引是算法本体
 fn savgol_filter(x: &[f32], window: usize, polyorder: usize) -> Vec<f32> {
     let coeffs = savgol_coeffs(window, polyorder);
     let n = x.len();
@@ -457,8 +473,11 @@ mod tests {
         let conf = conf_vec(midis.len(), 0.8);
         let out = remove_short_pitch_islands(&midis, &conf, 1.25, 5);
         let valid: Vec<f32> = out.iter().filter(|m| !m.is_nan()).copied().collect();
-        assert!(valid.iter().all(|&m| (m - 60.0).abs() < 1.0),
-                "mid-run octave island should be smoothed to C4: {:?}", valid);
+        assert!(
+            valid.iter().all(|&m| (m - 60.0).abs() < 1.0),
+            "mid-run octave island should be smoothed to C4: {:?}",
+            valid
+        );
     }
 
     /// 句首八度错误: C5(30ms) → C4(500ms) → 首部短暂 C5 被修正为相邻主音 C4
@@ -467,9 +486,12 @@ mod tests {
         let midis = midis_from(&[(72.0, 3), (60.0, 50)]);
         let conf = conf_vec(midis.len(), 0.8);
         let out = remove_short_pitch_islands(&midis, &conf, 1.25, 5);
-        let head: Vec<f32> = out[0..3].iter().copied().collect();
-        assert!(head.iter().all(|&m| (m - 60.0).abs() < 1.0),
-                "sentence-start C5 must be fixed to C4: {:?}", head);
+        let head: Vec<f32> = out[0..3].to_vec();
+        assert!(
+            head.iter().all(|&m| (m - 60.0).abs() < 1.0),
+            "sentence-start C5 must be fixed to C4: {:?}",
+            head
+        );
     }
 
     /// 尾音错误: E4(500ms) → E5(20ms) → 尾部 E5 被修正回 E4
@@ -478,9 +500,12 @@ mod tests {
         let midis = midis_from(&[(64.0, 50), (76.0, 2)]);
         let conf = conf_vec(midis.len(), 0.8);
         let out = remove_short_pitch_islands(&midis, &conf, 1.25, 5);
-        let tail: Vec<f32> = out[50..52].iter().copied().collect();
-        assert!(tail.iter().all(|&m| (m - 64.0).abs() < 1.0),
-                "tail E5 must be fixed to E4: {:?}", tail);
+        let tail: Vec<f32> = out[50..52].to_vec();
+        assert!(
+            tail.iter().all(|&m| (m - 64.0).abs() < 1.0),
+            "tail E5 must be fixed to E4: {:?}",
+            tail
+        );
     }
 
     /// 真实倚音: D4(100ms) → E4(400ms) → 首部足够长，不得被删除
@@ -489,9 +514,21 @@ mod tests {
         let midis = midis_from(&[(62.0, 10), (64.0, 40)]);
         let conf = conf_vec(midis.len(), 0.8);
         let out = remove_short_pitch_islands(&midis, &conf, 1.25, 5);
-        assert!((out[0] - 62.0).abs() < 0.5, "appoggiatura D4 must be kept: {}", out[0]);
-        assert!((out[9] - 62.0).abs() < 0.5, "appoggiatura tail must be kept: {}", out[9]);
-        assert!((out[10] - 64.0).abs() < 0.5, "main note E4 must be kept: {}", out[10]);
+        assert!(
+            (out[0] - 62.0).abs() < 0.5,
+            "appoggiatura D4 must be kept: {}",
+            out[0]
+        );
+        assert!(
+            (out[9] - 62.0).abs() < 0.5,
+            "appoggiatura tail must be kept: {}",
+            out[9]
+        );
+        assert!(
+            (out[10] - 64.0).abs() < 0.5,
+            "main note E4 must be kept: {}",
+            out[10]
+        );
     }
 
     /// 极短噪声: C4 中间 1 帧 G5(10ms) → 前后主音接近 → 插值抹平
@@ -501,8 +538,11 @@ mod tests {
         let conf = conf_vec(midis.len(), 0.8);
         let out = remove_short_pitch_islands(&midis, &conf, 1.25, 5);
         let valid: Vec<f32> = out.iter().filter(|m| !m.is_nan()).copied().collect();
-        assert!(valid.iter().all(|&m| (m - 60.0).abs() < 1.0),
-                "1-frame noise must be smoothed away: {:?}", valid);
+        assert!(
+            valid.iter().all(|&m| (m - 60.0).abs() < 1.0),
+            "1-frame noise must be smoothed away: {:?}",
+            valid
+        );
     }
 
     /// 短音但置信度高、且非八度 → 保留 (不误删真实短音)
@@ -525,14 +565,22 @@ mod tests {
         let conf = conf_vec(30, 0.9);
         let rms = conf_vec(30, 0.1);
         let out = stabilize_vocal_midi(&midis, &conf, &rms, 0.3, 0.005);
-        assert!(out[10].is_nan() && out[11].is_nan(), "isolated blip must be dropped: {:?}", &out[8..14]);
+        assert!(
+            out[10].is_nan() && out[11].is_nan(),
+            "isolated blip must be dropped: {:?}",
+            &out[8..14]
+        );
 
         // 连续正常发声段不受影响
         let mut midis2 = vec![f32::NAN; 10];
         midis2.extend(vec![60.0, 60.1, 60.2]);
         midis2.extend(vec![f32::NAN; 10]);
-        let out2 = stabilize_vocal_midi(&midis2, &conf_vec(23, 0.9), &conf_vec(23, 0.1), 0.3, 0.005);
+        let out2 =
+            stabilize_vocal_midi(&midis2, &conf_vec(23, 0.9), &conf_vec(23, 0.1), 0.3, 0.005);
         // 3 帧段恰好在阈值上, 保留
-        assert!(!out2[10].is_nan() && !out2[12].is_nan(), "3-frame segment must be kept");
+        assert!(
+            !out2[10].is_nan() && !out2[12].is_nan(),
+            "3-frame segment must be kept"
+        );
     }
 }

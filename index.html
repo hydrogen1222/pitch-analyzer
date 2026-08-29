@@ -56,6 +56,13 @@
           <div class="karaoke-display" id="karaoke-display">
             <div id="karaoke-pitch">---</div>
           </div>
+          <div id="debug-panel" style="display:none; position:absolute; left:12px; top:40px; max-width:46%; max-height:70%; overflow:auto; background:rgba(10,10,14,0.94); border:1px solid #2a4a44; border-radius:8px; padding:10px; font-size:11px; line-height:1.5; color:#c8e6df; white-space:pre-wrap; z-index:10; text-align:left;">
+            <div style="text-align:right; margin-bottom:4px;">
+              <button id="debug-export" style="background:#1a3a34; color:#7dffb4; border:none; border-radius:4px; padding:2px 8px; cursor:pointer; font-size:11px;">导出分段 JSON</button>
+              <button id="debug-close" style="background:#3a1a1a; color:#ff9d9d; border:none; border-radius:4px; padding:2px 8px; cursor:pointer; font-size:11px; margin-left:4px;">关闭</button>
+            </div>
+            <div id="debug-content"></div>
+          </div>
         </div>
         <div class="pitch-panel">
           <canvas id="pitch-canvas" class="pitch-canvas"></canvas>

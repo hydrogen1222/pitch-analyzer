@@ -39,7 +39,7 @@ pub fn export_ass(
     writeln!(f, "PlayResY: {}", PLAY_RES_Y).map_err(|e| e.to_string())?;
     writeln!(f, "WrapStyle: 2").map_err(|e| e.to_string())?;
     writeln!(f, "ScaledBorderAndShadow: yes").map_err(|e| e.to_string())?;
-    writeln!(f, "").map_err(|e| e.to_string())?;
+    writeln!(f).map_err(|e| e.to_string())?;
     writeln!(f, "[V4+ Styles]").map_err(|e| e.to_string())?;
     writeln!(f, "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding")
         .map_err(|e| e.to_string())?;
@@ -47,20 +47,23 @@ pub fn export_ass(
     // Alignment: Pitch=5(中部居中锚点, 配合 \pos), Lyric=2(底部居中)
     writeln!(
         f,
-        "Style: Pitch,Noto Sans CJK SC,{},{},{},{},{},-1,0,0,0,100,100,0,0,1,2,1,5,40,40,30,1",
-        pitch_font, "&H00FFFFFF", "&H00B4FF7D", "&H00101010", "&H80000000"
+        "Style: Pitch,Noto Sans CJK SC,{},&H00FFFFFF,&H00B4FF7D,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,5,40,40,30,1",
+        pitch_font
     )
     .map_err(|e| e.to_string())?;
     writeln!(
         f,
-        "Style: Lyric,Noto Sans CJK SC,{},{},{},{},{},-1,0,0,0,100,100,0,0,1,2,1,2,40,40,{},1",
-        lyric_font, "&H00FFFFFF", "&H00B4FF7D", "&H00101010", "&H80000000", LYRIC_MARGIN_V
+        "Style: Lyric,Noto Sans CJK SC,{},&H00FFFFFF,&H00B4FF7D,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,2,40,40,{},1",
+        lyric_font, LYRIC_MARGIN_V
     )
     .map_err(|e| e.to_string())?;
-    writeln!(f, "").map_err(|e| e.to_string())?;
+    writeln!(f).map_err(|e| e.to_string())?;
     writeln!(f, "[Events]").map_err(|e| e.to_string())?;
-    writeln!(f, "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
-        .map_err(|e| e.to_string())?;
+    writeln!(
+        f,
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
+    )
+    .map_err(|e| e.to_string())?;
 
     for line in lyrics {
         let tokens: Vec<&LyricToken> = line

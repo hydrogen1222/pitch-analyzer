@@ -108,8 +108,8 @@ fn test_primary_note_low_confidence_rejected() {
 fn test_align_clamps_to_voiced_window() {
     let n = 200;
     let mut midis = vec![f32::NAN; n];
-    for i in 70..130 {
-        midis[i] = 60.0; // 0.7s ~ 1.3s voiced
+    for m in &mut midis[70..130] {
+        *m = 60.0; // 0.7s ~ 1.3s voiced
     }
     let track = PitchTrack {
         times: (0..n).map(|i| i as f32 * 0.01).collect(),
@@ -130,18 +130,35 @@ fn test_align_clamps_to_voiced_window() {
     let ends: Vec<f32> = toks.iter().map(|t| t.end_time.unwrap()).collect();
 
     // 对齐窗口 = [max(0.5, 0.7-0.08), min(1.5, 1.3+0.08)] = [0.62, 1.37]
-    assert!((starts[0] - 0.62).abs() < 0.02, "first token must start at 0.62, got {}", starts[0]);
-    assert!((ends[2] - 1.37).abs() < 0.02, "last token must end at 1.37, got {}", ends[2]);
+    assert!(
+        (starts[0] - 0.62).abs() < 0.02,
+        "first token must start at 0.62, got {}",
+        starts[0]
+    );
+    assert!(
+        (ends[2] - 1.37).abs() < 0.02,
+        "last token must end at 1.37, got {}",
+        ends[2]
+    );
     // 递增且不重叠
     for i in 0..3 {
-        assert!(ends[i] > starts[i], "token {} must have positive duration", i);
+        assert!(
+            ends[i] > starts[i],
+            "token {} must have positive duration",
+            i
+        );
         if i > 0 {
             assert!(starts[i] >= ends[i - 1], "tokens must not overlap");
         }
     }
     // 每字时长 >= 最小字时长 (60ms)
     for i in 0..3 {
-        assert!(ends[i] - starts[i] >= 0.06, "token {} too short: {}", i, ends[i] - starts[i]);
+        assert!(
+            ends[i] - starts[i] >= 0.06,
+            "token {} too short: {}",
+            i,
+            ends[i] - starts[i]
+        );
     }
 }
 
@@ -165,8 +182,16 @@ fn test_align_skips_existing_times() {
         tok.end_time = Some(*e);
     }
     align_token_times(&mut lines, &track, &Default::default());
-    assert_eq!(lines[0].tokens[0].start_time, Some(0.5), "existing times must be kept");
-    assert_eq!(lines[0].tokens[2].end_time, Some(1.4), "existing times must be kept");
+    assert_eq!(
+        lines[0].tokens[0].start_time,
+        Some(0.5),
+        "existing times must be kept"
+    );
+    assert_eq!(
+        lines[0].tokens[2].end_time,
+        Some(1.4),
+        "existing times must be kept"
+    );
 }
 
 #[test]
@@ -184,6 +209,10 @@ fn test_bind_uses_note_events() {
             midi: 60,
             note_name: "C4".to_string(),
             confidence: 0.9,
+            center_midi: Some(60.0),
+            stable_duration: 0.4,
+            gestures: Vec::new(),
+            tracker_version: 2,
         }],
     };
     let mut lines = parse_lrc("[00:01.00]Test", Some(5.0));
@@ -194,7 +223,12 @@ fn test_bind_uses_note_events() {
     }
     bind_pitch_to_tokens(&mut lines, &track, 0.3, &NoteTrackingParams::default());
     let tok = &lines[0].tokens[0];
-    assert_eq!(tok.pitch_notes.len(), 1, "expected one bound note, got {:?}", tok.pitch_notes);
+    assert_eq!(
+        tok.pitch_notes.len(),
+        1,
+        "expected one bound note, got {:?}",
+        tok.pitch_notes
+    );
     let primary = tok.primary_note.as_ref().expect("primary_note must be set");
     assert_eq!(primary.median_midi, 60.0);
 }
@@ -213,7 +247,13 @@ fn test_parse_lrc_trailing_end_tags() {
                [00:10.000]second line[00:18.500]\n\
                [00:10.000]第二行歌词[00:18.500]\n";
     let lines = parse_lrc(lrc, Some(30.0));
-    assert_eq!(lines.len(), 2, "expected 2 merged lines, got {}: {:?}", lines.len(), lines.len());
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected 2 merged lines, got {}: {:?}",
+        lines.len(),
+        lines.len()
+    );
 
     // 行 1: 双语合并, 显式结束时间
     assert_eq!(lines[0].primary_text, "first line here");
@@ -239,7 +279,15 @@ fn test_parse_lrc_trailing_end_tags() {
 fn test_parse_lrc_lenient_timestamps() {
     let lrc = "[0:01]aaa[0:05]\n[00:05.5]bbb[00:09.25]\n";
     let lines = parse_lrc(lrc, Some(15.0));
-    assert_eq!(lines.len(), 2, "{:?}", lines.iter().map(|l| (&l.primary_text, l.start_time, l.end_time)).collect::<Vec<_>>());
+    assert_eq!(
+        lines.len(),
+        2,
+        "{:?}",
+        lines
+            .iter()
+            .map(|l| (&l.primary_text, l.start_time, l.end_time))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(lines[0].start_time, Some(1.0));
     assert_eq!(lines[0].end_time, Some(5.0));
     assert_eq!(lines[1].start_time, Some(5.5));
@@ -251,7 +299,7 @@ fn test_parse_lrc_lenient_timestamps() {
 fn test_parse_lrc_multi_timestamp_repeat() {
     let lrc = "[00:10.000][00:70.000]chorus line[00:80.000]\n";
     let lines = parse_lrc(lrc, Some(120.0));
-    // [00:70.000] 与 [00:80.000] 之间的文本为空? 不 — 文本在最后一个标签前, 
+    // [00:70.000] 与 [00:80.000] 之间的文本为空? 不 — 文本在最后一个标签前,
     // 标签 t1,t2 相连在开头, end 标签在文本后 → 首尾之间有文本 → 扩展格式
     // starts=[10], end=80... 但 [00:70] 夹在中间与首标签相连:
     // trimmed = "[00:10.000][00:70.000]chorus line[00:80.000]"
@@ -303,8 +351,16 @@ fn test_youon_codepoints() {
     assert_eq!(tokenize("しゃ"), vec!["しゃ"]);
     assert_eq!(tokenize("しゅ"), vec!["しゅ"], "しゅ (U+3085)");
     // 普通大小的や/ヤ絶不附着
-    assert_eq!(tokenize("てや"), vec!["て", "や"], "や (U+3084) is a normal kana");
-    assert_eq!(tokenize("テヤ"), vec!["テ", "ヤ"], "ヤ (U+30E4) is a normal katakana");
+    assert_eq!(
+        tokenize("てや"),
+        vec!["て", "や"],
+        "や (U+3084) is a normal kana"
+    );
+    assert_eq!(
+        tokenize("テヤ"),
+        vec!["テ", "ヤ"],
+        "ヤ (U+30E4) is a normal katakana"
+    );
     assert_eq!(tokenize("や"), vec!["や"]);
     assert_eq!(tokenize("ヤ"), vec!["ヤ"]);
 }
@@ -315,15 +371,27 @@ fn test_token_weight_heuristics() {
     assert!((token_weight("心") - 1.8).abs() < 1e-4);
     assert!((token_weight("きゃ") - 1.0).abs() < 1e-4);
     // ー 是独立一拍: スーパー = スー(2) + パー(2) = 4 mora
-    assert!((token_weight("スーパー") - 4.0).abs() < 1e-4, "ス・ー・パ・ー = 4 mora");
+    assert!(
+        (token_weight("スーパー") - 4.0).abs() < 1e-4,
+        "ス・ー・パ・ー = 4 mora"
+    );
     assert!((token_weight("りー") - 2.0).abs() < 1e-4);
-    assert!((token_weight("hello") - 2.0).abs() < 1e-4, "he-llo = 2 syllables");
+    assert!(
+        (token_weight("hello") - 2.0).abs() < 1e-4,
+        "he-llo = 2 syllables"
+    );
     assert!((token_weight("through") - 1.0).abs() < 1e-4);
     assert!((token_weight("魔法") - 3.6).abs() < 1e-4);
     // 促音/拨音各 1 拍
-    assert!((token_weight("がっこう") - 4.0).abs() < 1e-4, "が/っ/こ/う = 4");
+    assert!(
+        (token_weight("がっこう") - 4.0).abs() < 1e-4,
+        "が/っ/こ/う = 4"
+    );
     // 标点零权重
-    assert!((token_weight("た。") - 1.0).abs() < 1e-4, "punctuation must be 0 mora");
+    assert!(
+        (token_weight("た。") - 1.0).abs() < 1e-4,
+        "punctuation must be 0 mora"
+    );
     assert!((token_weight("あ!") - 1.0).abs() < 1e-4);
 }
 
@@ -332,9 +400,18 @@ fn test_token_weight_heuristics() {
 #[test]
 fn test_weighted_distribute() {
     let mut lines = parse_lrc("[00:00.000]心を砕いた[00:10.000]", Some(10.0));
-    assert_eq!(lines[0].tokens.len(), 5, "{:?}", lines[0].tokens.iter().map(|t| &t.text).collect::<Vec<_>>());
+    assert_eq!(
+        lines[0].tokens.len(),
+        5,
+        "{:?}",
+        lines[0].tokens.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
     distribute_token_times(&mut lines);
-    let durs: Vec<f32> = lines[0].tokens.iter().map(|t| t.end_time.unwrap() - t.start_time.unwrap()).collect();
+    let durs: Vec<f32> = lines[0]
+        .tokens
+        .iter()
+        .map(|t| t.end_time.unwrap() - t.start_time.unwrap())
+        .collect();
     let kanji_dur = durs[0];
     let kana_dur = durs[1];
     assert!(
@@ -373,7 +450,97 @@ fn test_melisma_token_binding() {
     bind_pitch_to_tokens(&mut lines, &track, 0.3, &NoteTrackingParams::default());
     let first = &lines[0].tokens[0];
     // 帧 0-20 属于第一个 token (0~0.5s 均匀分配)
-    assert!(first.pitch_notes.len() >= 2, "melisma token must keep all notes: {:?}", first.pitch_notes);
+    assert!(
+        first.pitch_notes.len() >= 2,
+        "melisma token must keep all notes: {:?}",
+        first.pitch_notes
+    );
     let primary = first.primary_note.as_ref().unwrap();
-    assert_eq!(primary.rounded_midi, 64, "primary must be the long E4, not first C4");
+    assert_eq!(
+        primary.rounded_midi, 64,
+        "primary must be the long E4, not first C4"
+    );
+}
+
+/// v2 路径的转音绑定: NoteEvent 层已有 C4(短) + E4(长), token 聚合后
+/// primary = E4 (覆盖 x 置信 x 稳定), 两个音都在 pitch_notes
+#[test]
+fn test_melisma_binding_v2_events() {
+    let times: Vec<f32> = (0..100).map(|i| i as f32 * 0.01).collect();
+    let mk = |start: f32, end: f32, midi: i32| NoteEvent {
+        start,
+        end,
+        midi,
+        note_name: String::new(),
+        confidence: 0.9,
+        center_midi: Some(midi as f32),
+        stable_duration: end - start,
+        gestures: Vec::new(),
+        tracker_version: 2,
+    };
+    let track = PitchTrack {
+        times,
+        frequencies: vec![261.63; 100],
+        confidences: vec![0.9; 100],
+        midis: {
+            let mut m = vec![60.0; 20];
+            m.extend(vec![64.0; 80]);
+            m
+        },
+        rms: Vec::new(),
+        flux: Vec::new(),
+        note_events: vec![mk(0.0, 0.2, 60), mk(0.2, 1.0, 64)],
+    };
+    let mut lines = parse_lrc("[00:00.000]ああ", Some(1.0));
+    distribute_token_times(&mut lines);
+    bind_pitch_to_tokens(&mut lines, &track, 0.3, &NoteTrackingParams::default());
+    let first = &lines[0].tokens[0];
+    assert_eq!(
+        first.pitch_notes.len(),
+        2,
+        "both notes admitted: {:?}",
+        first.pitch_notes
+    );
+    let primary = first.primary_note.as_ref().unwrap();
+    assert_eq!(primary.rounded_midi, 64, "primary = long E4");
+}
+
+/// 零真实重叠的邻近事件不得产生正式 badge (B1 准入硬性验收)
+#[test]
+fn test_zero_overlap_neighbor_not_bound() {
+    let times: Vec<f32> = (0..100).map(|i| i as f32 * 0.01).collect();
+    let mk = |start: f32, end: f32, midi: i32| NoteEvent {
+        start,
+        end,
+        midi,
+        note_name: String::new(),
+        confidence: 0.95,
+        center_midi: Some(midi as f32),
+        stable_duration: end - start,
+        gestures: Vec::new(),
+        tracker_version: 2,
+    };
+    let track = PitchTrack {
+        times,
+        frequencies: vec![261.63; 100],
+        confidences: vec![0.9; 100],
+        midis: vec![f32::NAN; 100],
+        rms: Vec::new(),
+        flux: Vec::new(),
+        // 事件在 token 窗口 [0, 0.5] 之外 18ms 处结束 (零重叠)
+        note_events: vec![mk(0.0, 0.518, 62)],
+    };
+    let mut lines = parse_lrc("[00:00.518]あ", Some(1.0));
+    distribute_token_times(&mut lines);
+    bind_pitch_to_tokens(&mut lines, &track, 0.3, &NoteTrackingParams::default());
+    let tok = &lines[0].tokens[0];
+    assert!(
+        tok.primary_note.is_none() && tok.pitch_notes.is_empty(),
+        "zero-overlap neighbor must NOT become a badge: {:?}",
+        tok.pitch_notes
+    );
+    assert!(
+        tok.unpitched_reason.is_some(),
+        "unpitched reason must be set"
+    );
 }

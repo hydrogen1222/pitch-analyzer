@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { PitchCanvas } from "./pitch_canvas";
 import { KaraokeDisplay } from "./karaoke_display";
 import { type PitchTrack, type AnalysisParams } from "./types";
-import type { LyricLine } from "./models_lyrics";
+import type { LyricLine, LyricToken } from "./models_lyrics";
 
 // 检查是否在 Tauri 环境中运行
 const isTauri = typeof window !== "undefined" && "__TAURI__" in window;
@@ -470,6 +470,77 @@ async function initApp() {
   detailedPitchInput?.addEventListener("change", () => {
     if (karaokeDisplay) karaokeDisplay.detailedPitch = detailedPitchInput?.checked ?? false;
   });
+
+  // ── Debug Overlay (任务书 E1): 点击 token 显示分层定位信息 ──
+  const debugPanel = document.querySelector("#debug-panel") as HTMLElement | null;
+  const debugContent = document.querySelector("#debug-content") as HTMLElement | null;
+  const debugClose = document.querySelector("#debug-close") as HTMLButtonElement | null;
+  const debugExport = document.querySelector("#debug-export") as HTMLButtonElement | null;
+  debugClose?.addEventListener("click", () => {
+    if (debugPanel) debugPanel.style.display = "none";
+  });
+  debugExport?.addEventListener("click", async () => {
+    try {
+      const selected = await save({ filters: [{ name: "JSON", extensions: ["json"] }], defaultPath: "pitch-debug.json" });
+      if (!selected) return;
+      await invoke("export_debug_segment", { path: selected, aroundSecs: state.currentTime });
+      setStatus("调试 JSON 已导出");
+    } catch (e) {
+      await message("导出失败: " + e, { title: "错误", kind: "error" });
+    }
+  });
+
+  const noteNameOf = (midi: number) => {
+    const names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    const r = Math.round(midi);
+    return `${names[((r % 12) + 12) % 12]}${Math.floor(r / 12) - 1}`;
+  };
+
+  const showTokenDebug = (lineIdx: number, tokenIdx: number) => {
+    const line = state.lyrics[lineIdx];
+    if (!line || !debugContent || !debugPanel) return;
+    const token: LyricToken | undefined = line.tokens[tokenIdx];
+    if (!token) return;
+    const lines: string[] = [];
+    lines.push(`Surface: ${token.text}`);
+    const spans = (token.reading_span_ids ?? []).map((si) => line.reading_spans?.[si]).filter(Boolean);
+    for (const sp of spans) {
+      lines.push(`Reading: ${sp!.reading || "(未知, 需词典/override)"}  [${sp!.surface}] conf=${sp!.confidence.toFixed(2)}`);
+    }
+    const cs = token.char_start ?? 0;
+    const ce = token.char_end ?? 0;
+    const moras = (line.moras ?? []).filter((m) => cs < m.char_end && m.char_start < ce);
+    if (moras.length > 0) {
+      lines.push(`Moras: ${moras.map((m) => m.kana).join(" / ")}`);
+      lines.push(`Phonemes: ${moras.flatMap((m) => m.phonemes).join(" ")}`);
+      const mt = moras.filter((m) => m.start_time != null);
+      if (mt.length > 0) {
+        lines.push(`Mora time: ${mt[0].start_time!.toFixed(3)} - ${mt[mt.length - 1].end_time!.toFixed(3)}`);
+      }
+      for (const m of moras) {
+        for (const b of m.note_bindings ?? []) {
+          const ev = state.track?.note_events?.[b.note_event_index];
+          const nm = ev ? noteNameOf(ev.midi) : "?";
+          lines.push(`  binding ${nm}: overlap=${b.overlap_ms.toFixed(0)}ms r_tok=${b.overlap_ratio_token.toFixed(2)} r_note=${b.overlap_ratio_note.toFixed(2)} score=${b.score.toFixed(2)}`);
+        }
+      }
+    }
+    lines.push(`Token time: ${token.start_time?.toFixed(3) ?? "?"} - ${token.end_time?.toFixed(3) ?? "?"}`);
+    lines.push(`Alignment: ${token.alignment_source ?? "?"} conf=${(token.alignment_confidence ?? 0).toFixed(2)}`);
+    if (token.pitch_notes?.length) {
+      lines.push(`Notes (${token.pitch_notes.length}):`);
+      for (const n of token.pitch_notes) {
+        lines.push(`  ${noteNameOf(n.median_midi)}  ${n.start_time.toFixed(3)}-${n.end_time.toFixed(3)} conf=${n.confidence_mean.toFixed(2)}`);
+      }
+    } else {
+      lines.push(`Notes: (无正式绑定)`);
+    }
+    lines.push(`Unpitched reason: ${token.unpitched_reason ?? "-"}`);
+    lines.push(`Tracker: v${state.track?.note_events?.[0]?.tracker_version ?? "?"}`);
+    debugContent.textContent = lines.join("\n");
+    debugPanel.style.display = "block";
+  };
+  if (karaokeDisplay) karaokeDisplay.onTokenDebug = showTokenDebug;
 
   pitchFontInput?.addEventListener("input", () => {
     if (karaokeDisplay) karaokeDisplay.setPitchFontSize(parseInt(pitchFontInput?.value || "48"));

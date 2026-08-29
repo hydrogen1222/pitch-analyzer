@@ -54,7 +54,11 @@ fn test_export_ass_karaoke() {
     // karaoke 标签 + 音高
     assert!(content.contains("{\\k"));
     assert!(content.contains("Dialogue: 0,"));
-    assert!(content.contains("C4"), "pitch dialogue must contain note name C4:\n{}", content);
+    assert!(
+        content.contains("C4"),
+        "pitch dialogue must contain note name C4:\n{}",
+        content
+    );
 }
 
 #[test]
@@ -93,14 +97,21 @@ fn test_export_ass_uses_primary_not_first() {
     export_ass(&lines, &out, 40, 28).unwrap();
     let content = std::fs::read_to_string(&out).unwrap();
     assert!(content.contains("C4"));
-    assert!(!content.contains("F5"), "ASS must display primary_note (C4), not first note F5");
+    assert!(
+        !content.contains("F5"),
+        "ASS must display primary_note (C4), not first note F5"
+    );
 }
 
 #[test]
 fn test_export_ass_no_lyrics_error() {
     let out = std::env::temp_dir().join("test_empty.ass");
     let err = export_ass(&[], &out, 40, 28).unwrap_err();
-    assert!(err.contains("没有歌词"), "expected no-lyrics error, got: {}", err);
+    assert!(
+        err.contains("没有歌词"),
+        "expected no-lyrics error, got: {}",
+        err
+    );
 }
 
 #[test]
@@ -131,13 +142,16 @@ fn test_export_srt_primary_fallback() {
                     point_count: 46,
                 },
             ];
-            tok.primary_note =
-                select_primary_note(&tok.pitch_notes, 0.0, 0.0);
+            tok.primary_note = select_primary_note(&tok.pitch_notes, 0.0, 0.0);
         }
     }
     let out = std::env::temp_dir().join("test_srt_fallback.srt");
     export_srt(&track, &lines, &out).unwrap();
     let content = std::fs::read_to_string(&out).unwrap();
-    assert!(content.contains("[C4]"), "SRT fallback must choose C4:\n{}", content);
+    assert!(
+        content.contains("[C4]"),
+        "SRT fallback must choose C4:\n{}",
+        content
+    );
     assert!(!content.contains("[F5]"));
 }

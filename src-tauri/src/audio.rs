@@ -3,7 +3,9 @@
 // 用 symphonia 解码任意主流格式 (wav/flac/mp3/ogg/aac)，
 // 再用 rubato 做高质量重采样到 16 kHz。
 
-use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
 use std::fs::File;
 use std::path::Path;
 use symphonia::core::audio::{AudioBufferRef, Signal};
@@ -39,7 +41,11 @@ pub fn compute_rms_envelope(samples: &[f32], n_frames: usize) -> Vec<f32> {
             sum += s * s;
             cnt += 1;
         }
-        rms.push(if cnt > 0 { (sum / cnt as f32).sqrt() } else { 0.0 });
+        rms.push(if cnt > 0 {
+            (sum / cnt as f32).sqrt()
+        } else {
+            0.0
+        });
     }
     rms
 }
@@ -55,7 +61,12 @@ pub fn load_audio_16k_mono(path: &Path) -> Result<DecodedAudio, String> {
     }
 
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .map_err(|e| format!("识别音频格式失败: {}", e))?;
 
     let mut format = probed.format;
@@ -141,9 +152,13 @@ fn append_mono(buf: &AudioBufferRef<'_>, channels: usize, out: &mut Vec<f32>) {
         AudioBufferRef::U24(b) => mix_planar!(b, |x: symphonia::core::sample::u24| {
             (x.inner() as f32 - 8_388_608.0) / 8_388_608.0
         }),
-        AudioBufferRef::U32(b) => mix_planar!(b, |x: u32| (x as f32 - 2_147_483_648.0) / 2_147_483_648.0),
+        AudioBufferRef::U32(b) => {
+            mix_planar!(b, |x: u32| (x as f32 - 2_147_483_648.0) / 2_147_483_648.0)
+        }
         AudioBufferRef::S8(b) => mix_planar!(b, |x: i8| x as f32 / 128.0),
-        AudioBufferRef::S24(b) => mix_planar!(b, |x: symphonia::core::sample::i24| x.inner() as f32 / 8_388_608.0),
+        AudioBufferRef::S24(b) => mix_planar!(b, |x: symphonia::core::sample::i24| x.inner()
+            as f32
+            / 8_388_608.0),
     }
 }
 

@@ -27,10 +27,19 @@ fn midis_from(vals: &[(f32, usize)]) -> Vec<f32> {
 fn test_short_octave_error_merged() {
     let midis = midis_from(&[(60.0, 10), (72.0, 2), (60.0, 10)]);
     let events = run(&midis);
-    assert_eq!(events.len(), 1, "expected a single C4 event, got {:?}", events);
+    assert_eq!(
+        events.len(),
+        1,
+        "expected a single C4 event, got {:?}",
+        events
+    );
     assert_eq!(events[0].0, 60);
     // 事件应覆盖整个音区
-    assert!(events[0].2 - events[0].1 > 0.18, "event too short: {:?}", events[0]);
+    assert!(
+        events[0].2 - events[0].1 > 0.18,
+        "event too short: {:?}",
+        events[0]
+    );
 }
 
 /// 句首八度错误: C5(30ms) → C4(500ms) → 首部 C5 应被丢弃，主音为 C4
@@ -38,9 +47,18 @@ fn test_short_octave_error_merged() {
 fn test_sentence_start_octave_dropped() {
     let midis = midis_from(&[(72.0, 3), (60.0, 50)]);
     let events = run(&midis);
-    assert_eq!(events.len(), 1, "expected a single C4 event, got {:?}", events);
+    assert_eq!(
+        events.len(),
+        1,
+        "expected a single C4 event, got {:?}",
+        events
+    );
     assert_eq!(events[0].0, 60, "sentence-start C5 must be dropped");
-    assert!(events[0].2 - events[0].1 > 0.4, "C4 event too short: {:?}", events[0]);
+    assert!(
+        events[0].2 - events[0].1 > 0.4,
+        "C4 event too short: {:?}",
+        events[0]
+    );
 }
 
 /// 真实倚音: D4(100ms) → E4(400ms) → 两个真实音符都应保留
@@ -48,7 +66,12 @@ fn test_sentence_start_octave_dropped() {
 fn test_real_appoggiatura_kept() {
     let midis = midis_from(&[(62.0, 10), (64.0, 40)]);
     let events = run(&midis);
-    assert_eq!(events.len(), 2, "real appoggiatura must be kept, got {:?}", events);
+    assert_eq!(
+        events.len(),
+        2,
+        "real appoggiatura must be kept, got {:?}",
+        events
+    );
     assert_eq!(events[0].0, 62); // D4
     assert_eq!(events[1].0, 64); // E4
 }
@@ -58,7 +81,12 @@ fn test_real_appoggiatura_kept() {
 fn test_semitone_jitter_absorbed() {
     let midis = midis_from(&[(60.0, 20), (61.0, 2), (60.0, 20), (61.0, 2), (60.0, 20)]);
     let events = run(&midis);
-    assert_eq!(events.len(), 1, "semitone jitter must be absorbed, got {:?}", events);
+    assert_eq!(
+        events.len(),
+        1,
+        "semitone jitter must be absorbed, got {:?}",
+        events
+    );
     assert_eq!(events[0].0, 60);
 }
 
@@ -67,7 +95,12 @@ fn test_semitone_jitter_absorbed() {
 fn test_real_note_change_two_events() {
     let midis = midis_from(&[(60.0, 20), (67.0, 20)]);
     let events = run(&midis);
-    assert_eq!(events.len(), 2, "real note change must yield 2 events, got {:?}", events);
+    assert_eq!(
+        events.len(),
+        2,
+        "real note change must yield 2 events, got {:?}",
+        events
+    );
     assert_eq!(events[0].0, 60);
     assert_eq!(events[1].0, 67);
 }
@@ -77,7 +110,12 @@ fn test_real_note_change_two_events() {
 fn test_very_short_noise_dropped() {
     let midis = midis_from(&[(60.0, 10), (79.0, 1), (60.0, 10)]);
     let events = run(&midis);
-    assert_eq!(events.len(), 1, "10ms noise must be dropped, got {:?}", events);
+    assert_eq!(
+        events.len(),
+        1,
+        "10ms noise must be dropped, got {:?}",
+        events
+    );
     assert_eq!(events[0].0, 60);
 }
 
@@ -86,7 +124,12 @@ fn test_very_short_noise_dropped() {
 fn test_tail_octave_error_dropped() {
     let midis = midis_from(&[(64.0, 50), (76.0, 2)]);
     let events = run(&midis);
-    assert_eq!(events.len(), 1, "tail octave error must be dropped, got {:?}", events);
+    assert_eq!(
+        events.len(),
+        1,
+        "tail octave error must be dropped, got {:?}",
+        events
+    );
     assert_eq!(events[0].0, 64, "expected E4, got {}", events[0].0);
 }
 
@@ -104,5 +147,9 @@ fn test_long_stable_note_single_event() {
     let events = run(&midis);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].0, 60);
-    assert!((events[0].2 - events[0].1 - 2.0).abs() < 0.1, "duration wrong: {:?}", events[0]);
+    assert!(
+        (events[0].2 - events[0].1 - 2.0).abs() < 0.1,
+        "duration wrong: {:?}",
+        events[0]
+    );
 }

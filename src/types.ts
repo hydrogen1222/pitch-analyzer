@@ -14,6 +14,9 @@ export interface NoteEvent {
   midi: number;
   note_name: string;
   confidence: number;
+  center_midi?: number | null;
+  stable_duration?: number;
+  tracker_version?: number;
 }
 
 export interface AnalysisParams {

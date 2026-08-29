@@ -73,9 +73,17 @@ pub fn try_init_ort_dylib() {
         }
     }
     // 编译期路径: cargo test / dev 运行时定位 src-tauri/resources
-    explicit.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join(dylib_name));
+    explicit.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(dylib_name),
+    );
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        explicit.push(PathBuf::from(&manifest_dir).join("resources").join(dylib_name));
+        explicit.push(
+            PathBuf::from(&manifest_dir)
+                .join("resources")
+                .join(dylib_name),
+        );
     }
     for p in explicit {
         if p.exists() {
@@ -126,7 +134,14 @@ pub fn try_init_ort_dylib() {
         search_dirs.push("./.venv/lib".to_string());
         search_dirs.push("../.venv/lib".to_string());
 
-        let py_versions = ["python3.13", "python3.12", "python3.11", "python3.10", "python3.9", "python3.8"];
+        let py_versions = [
+            "python3.13",
+            "python3.12",
+            "python3.11",
+            "python3.10",
+            "python3.9",
+            "python3.8",
+        ];
         for base_dir in search_dirs {
             for py_ver in &py_versions {
                 let capi_path = format!("{}/{}/site-packages/onnxruntime/capi", base_dir, py_ver);
@@ -154,10 +169,16 @@ pub fn init_bundled_ort_dylib(app_handle: &tauri::AppHandle) {
     #[cfg(target_os = "macos")]
     let lib_name = "libonnxruntime.dylib";
 
-    if let Ok(resource_path) = app_handle.path().resolve(format!("resources/{}", lib_name), tauri::path::BaseDirectory::Resource) {
+    if let Ok(resource_path) = app_handle.path().resolve(
+        format!("resources/{}", lib_name),
+        tauri::path::BaseDirectory::Resource,
+    ) {
         if resource_path.exists() {
             std::env::set_var("ORT_DYLIB_PATH", &resource_path);
-            eprintln!("Loaded bundled ORT dylib from resource: {}", resource_path.display());
+            eprintln!(
+                "Loaded bundled ORT dylib from resource: {}",
+                resource_path.display()
+            );
             return;
         }
     }
@@ -178,7 +199,11 @@ struct AppConfig {
 }
 
 fn get_config_path(app_handle: &tauri::AppHandle) -> Option<PathBuf> {
-    app_handle.path().app_config_dir().ok().map(|p| p.join("config.json"))
+    app_handle
+        .path()
+        .app_config_dir()
+        .ok()
+        .map(|p| p.join("config.json"))
 }
 
 fn load_stored_config(app_handle: &tauri::AppHandle) -> Option<AppConfig> {
@@ -207,7 +232,10 @@ fn save_stored_config(app_handle: &tauri::AppHandle, config_path: &str, model_pa
 }
 
 #[tauri::command]
-async fn init_analyzer(app_handle: tauri::AppHandle, app_state: tauri::State<'_, AppState>) -> Result<String, String> {
+async fn init_analyzer(
+    app_handle: tauri::AppHandle,
+    app_state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
     init_bundled_ort_dylib(&app_handle);
 
     // 1. Try loading from stored config first
@@ -216,7 +244,10 @@ async fn init_analyzer(app_handle: tauri::AppHandle, app_state: tauri::State<'_,
         let cfg_path = PathBuf::from(&cfg.config_path);
         let mdl_path = PathBuf::from(&cfg.model_path);
         if cfg_path.exists() && mdl_path.exists() {
-            eprintln!("Successfully loaded model from app configuration: {}", cfg.model_path);
+            eprintln!(
+                "Successfully loaded model from app configuration: {}",
+                cfg.model_path
+            );
             resolved_paths = Some((cfg_path, mdl_path));
         }
     }
@@ -229,11 +260,16 @@ async fn init_analyzer(app_handle: tauri::AppHandle, app_state: tauri::State<'_,
             .ok_or_else(|| "找不到 models/fcpe.onnx 或 fcpe_config.json".to_string())?
     };
 
-    let content = std::fs::read_to_string(&config_path).map_err(|e| format!("读取 config 失败: {}", e))?;
-    let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| format!("解析 config 失败: {}", e))?;
+    let content =
+        std::fs::read_to_string(&config_path).map_err(|e| format!("读取 config 失败: {}", e))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("解析 config 失败: {}", e))?;
     let cent_table: Vec<f32> = json["cent_table"]
-        .as_array().ok_or_else(|| "config 缺少 cent_table".to_string())?
-        .iter().filter_map(|v| v.as_f64().map(|x| x as f32)).collect();
+        .as_array()
+        .ok_or_else(|| "config 缺少 cent_table".to_string())?
+        .iter()
+        .filter_map(|v| v.as_f64().map(|x| x as f32))
+        .collect();
     let analyzer = PitchAnalyzer::new(&model_path.to_string_lossy(), cent_table)
         .map_err(|e| format!("初始化 analyzer 失败: {}", e))?;
     *app_state.analyzer.lock().unwrap() = Some(analyzer);
@@ -259,11 +295,16 @@ async fn init_analyzer_with_paths(
         return Err("所选的配置文件或模型文件不存在".to_string());
     }
 
-    let content = std::fs::read_to_string(&cfg_path).map_err(|e| format!("读取 config 失败: {}", e))?;
-    let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| format!("解析 config 失败: {}", e))?;
+    let content =
+        std::fs::read_to_string(&cfg_path).map_err(|e| format!("读取 config 失败: {}", e))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("解析 config 失败: {}", e))?;
     let cent_table: Vec<f32> = json["cent_table"]
-        .as_array().ok_or_else(|| "config 缺少 cent_table".to_string())?
-        .iter().filter_map(|v| v.as_f64().map(|x| x as f32)).collect();
+        .as_array()
+        .ok_or_else(|| "config 缺少 cent_table".to_string())?
+        .iter()
+        .filter_map(|v| v.as_f64().map(|x| x as f32))
+        .collect();
     let analyzer = PitchAnalyzer::new(&mdl_path.to_string_lossy(), cent_table)
         .map_err(|e| format!("初始化 analyzer 失败: {}", e))?;
 
@@ -292,15 +333,22 @@ async fn analyze_audio(
 
     let track = {
         let guard = app_state.analyzer.lock().unwrap();
-        let analyzer = guard.as_ref().ok_or_else(|| "Analyzer 尚未初始化".to_string())?;
+        let analyzer = guard
+            .as_ref()
+            .ok_or_else(|| "Analyzer 尚未初始化".to_string())?;
         let app_handle_clone = app_handle.clone();
 
-        analyzer.analyze(&audio_path, &config, move |progress, stage| {
-            let _ = app_handle_clone.emit("analysis-progress", ProgressPayload {
-                progress,
-                stage: stage.to_string(),
-            });
-        }).map_err(|e| format!("分析失败: {}", e))?
+        analyzer
+            .analyze(&audio_path, &config, move |progress, stage| {
+                let _ = app_handle_clone.emit(
+                    "analysis-progress",
+                    ProgressPayload {
+                        progress,
+                        stage: stage.to_string(),
+                    },
+                );
+            })
+            .map_err(|e| format!("分析失败: {}", e))?
     };
 
     // 确保播放器可用并加载音频
@@ -327,9 +375,16 @@ async fn analyze_audio(
 }
 
 #[tauri::command]
-fn load_lyrics_lrc(app_state: tauri::State<AppState>, path: String) -> Result<Vec<LyricLine>, String> {
+fn load_lyrics_lrc(
+    app_state: tauri::State<AppState>,
+    path: String,
+) -> Result<Vec<LyricLine>, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| format!("读取失败: {}", e))?;
-    let duration = app_state.track.lock().unwrap().as_ref()
+    let duration = app_state
+        .track
+        .lock()
+        .unwrap()
+        .as_ref()
         .map(|t| t.times.last().copied().unwrap_or(0.0));
     let mut lines = crate::lyrics::parse_lrc(&content, duration);
     // 句级约束下根据音频特征做字级对齐 (无 track 时回退均匀分配)
@@ -352,7 +407,10 @@ fn load_lyrics_lrc(app_state: tauri::State<AppState>, path: String) -> Result<Ve
 }
 
 #[tauri::command]
-fn load_lyrics_txt(app_state: tauri::State<AppState>, path: String) -> Result<Vec<LyricLine>, String> {
+fn load_lyrics_txt(
+    app_state: tauri::State<AppState>,
+    path: String,
+) -> Result<Vec<LyricLine>, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| format!("读取失败: {}", e))?;
     let lines = crate::lyrics::parse_txt(&content);
     // 先写入 state → rebind → 从更新后的 state clone → 返回
@@ -374,9 +432,16 @@ fn rebind_lyrics(app_state: &tauri::State<AppState>) {
         Some(t) => t,
         None => return,
     };
-    let params = app_state.analysis_params.lock().unwrap().clone().unwrap_or_default();
-    let mut note_tracking = NoteTrackingParams::default();
-    note_tracking.min_note_duration_ms = params.min_note_duration_ms;
+    let params = app_state
+        .analysis_params
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_default();
+    let note_tracking = NoteTrackingParams {
+        min_note_duration_ms: params.min_note_duration_ms,
+        ..Default::default()
+    };
     let mut lyrics_guard = app_state.lyrics.lock().unwrap();
     crate::lyrics::bind_pitch_to_tokens(
         &mut lyrics_guard,
@@ -388,48 +453,79 @@ fn rebind_lyrics(app_state: &tauri::State<AppState>) {
 
 #[tauri::command]
 fn playback_play(app_state: tauri::State<AppState>) -> Result<(), String> {
-    app_state.player.lock().unwrap().as_ref()
+    app_state
+        .player
+        .lock()
+        .unwrap()
+        .as_ref()
         .ok_or_else(|| "播放器未初始化".to_string())?
         .play()
 }
 
 #[tauri::command]
 fn playback_pause(app_state: tauri::State<AppState>) -> Result<(), String> {
-    app_state.player.lock().unwrap().as_ref()
+    app_state
+        .player
+        .lock()
+        .unwrap()
+        .as_ref()
         .ok_or_else(|| "播放器未初始化".to_string())?
         .pause()
 }
 
 #[tauri::command]
 fn playback_seek(app_state: tauri::State<AppState>, secs: f32) -> Result<(), String> {
-    app_state.player.lock().unwrap().as_ref()
+    app_state
+        .player
+        .lock()
+        .unwrap()
+        .as_ref()
         .ok_or_else(|| "播放器未初始化".to_string())?
         .seek(secs)
 }
 
 #[tauri::command]
 fn playback_set_volume(app_state: tauri::State<AppState>, vol: f32) -> Result<(), String> {
-    app_state.player.lock().unwrap().as_ref()
+    app_state
+        .player
+        .lock()
+        .unwrap()
+        .as_ref()
         .ok_or_else(|| "播放器未初始化".to_string())?
         .set_volume(vol)
 }
 
 #[tauri::command]
 fn playback_position(app_state: tauri::State<AppState>) -> Result<f32, String> {
-    Ok(app_state.player.lock().unwrap().as_ref()
-        .map(|p| p.position()).unwrap_or(0.0))
+    Ok(app_state
+        .player
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|p| p.position())
+        .unwrap_or(0.0))
 }
 
 #[tauri::command]
 fn playback_duration(app_state: tauri::State<AppState>) -> Result<f32, String> {
-    Ok(app_state.player.lock().unwrap().as_ref()
-        .map(|p| p.duration()).unwrap_or(0.0))
+    Ok(app_state
+        .player
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|p| p.duration())
+        .unwrap_or(0.0))
 }
 
 #[tauri::command]
 fn playback_is_playing(app_state: tauri::State<AppState>) -> Result<bool, String> {
-    Ok(app_state.player.lock().unwrap().as_ref()
-        .map(|p| p.is_playing()).unwrap_or(false))
+    Ok(app_state
+        .player
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|p| p.is_playing())
+        .unwrap_or(false))
 }
 
 #[tauri::command]
@@ -449,7 +545,8 @@ fn save_project(app_state: tauri::State<AppState>, path: String) -> Result<(), S
 #[tauri::command]
 fn load_project(app_state: tauri::State<AppState>, path: String) -> Result<ProjectData, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| format!("读取失败: {}", e))?;
-    let data: ProjectData = serde_json::from_str(&content).map_err(|e| format!("解析失败: {}", e))?;
+    let data: ProjectData =
+        serde_json::from_str(&content).map_err(|e| format!("解析失败: {}", e))?;
 
     *app_state.track.lock().unwrap() = data.pitch_track.clone();
     *app_state.lyrics.lock().unwrap() = data.lyrics.clone();
@@ -507,6 +604,82 @@ fn midi_to_note_name(midi: f32) -> String {
     crate::models::midi_to_note_name(midi)
 }
 
+/// 分段调试导出 (任务书 §12): 对当前播放点 ±window 输出全链路中间数据,
+/// 出现"这个字音高不对"时, 用这份 JSON 即可定位是 FCPE / NoteTracker /
+/// Reading / Alignment / Binder 哪一层的问题, 不再靠截图猜。
+#[tauri::command]
+fn export_debug_segment(
+    app_state: tauri::State<AppState>,
+    path: String,
+    around_secs: f32,
+    window_secs: Option<f32>,
+) -> Result<(), String> {
+    let window = window_secs.unwrap_or(5.0).clamp(1.0, 60.0);
+    let w_start = (around_secs - window).max(0.0);
+    let w_end = around_secs + window;
+
+    let track = app_state.track.lock().unwrap();
+    let lyrics = app_state.lyrics.lock().unwrap();
+
+    let mut pitch_frames = Vec::new();
+    if let Some(t) = track.as_ref() {
+        for i in 0..t.times.len() {
+            if t.times[i] < w_start || t.times[i] > w_end {
+                continue;
+            }
+            pitch_frames.push(serde_json::json!({
+                "t": t.times[i],
+                "midi": t.midis.get(i).copied(),
+                "conf": t.confidences.get(i).copied(),
+                "rms": t.rms.get(i).copied(),
+                "flux": t.flux.get(i).copied(),
+            }));
+        }
+    }
+
+    let note_events: Vec<_> = track
+        .as_ref()
+        .map(|t| {
+            t.note_events
+                .iter()
+                .filter(|e| e.end >= w_start && e.start <= w_end)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let lines_json: Vec<_> = lyrics
+        .iter()
+        .filter(|l| {
+            l.start_time.is_some_and(|s| s <= w_end) && l.end_time.is_some_and(|e| e >= w_start)
+        })
+        .map(|l| {
+            serde_json::json!({
+                "text": l.primary_text,
+                "start": l.start_time,
+                "end": l.end_time,
+                "reading_spans": l.reading_spans,
+                "moras": l.moras,
+                "tokens": l.tokens,
+            })
+        })
+        .collect();
+
+    let doc = serde_json::json!({
+        "exported_at_window": { "start": w_start, "end": w_end, "around": around_secs },
+        "versions": {
+            "note_tracker": 2,
+            "alignment": "MoraDp/EnhancedLrc/WeightedFallback per token",
+        },
+        "pitch_frames": pitch_frames,
+        "musical_note_events": note_events,
+        "lines": lines_json,
+    });
+
+    let content = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(&path, content).map_err(|e| format!("写入失败: {}", e))?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -538,6 +711,7 @@ pub fn run() {
             load_project,
             export_srt,
             export_ass,
+            export_debug_segment,
             midi_to_note_name,
         ])
         .run(tauri::generate_context!())

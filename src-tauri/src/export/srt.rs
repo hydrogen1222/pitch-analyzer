@@ -61,7 +61,10 @@ pub fn export_srt(
         let interval = 0.5f32;
         let mut t = 0.0f32;
         while t < max_time {
-            let i = match pitch_track.times.binary_search_by(|probe| probe.partial_cmp(&t).unwrap()) {
+            let i = match pitch_track
+                .times
+                .binary_search_by(|probe| probe.partial_cmp(&t).unwrap())
+            {
                 Ok(i) => i,
                 Err(i) => i.min(pitch_track.midis.len().saturating_sub(1)),
             };

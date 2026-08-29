@@ -23,6 +23,9 @@ export class KaraokeDisplay {
   private candidateSince: number = 0;
   private noteHoldSecs: number = 0.07;
 
+  /// Debug Overlay: 点击 token 时的回调 (line 下标, token 下标)
+  onTokenDebug: ((lineIdx: number, tokenIdx: number) => void) | null = null;
+
   // 渲染缓存: 内容无变化时每帧只更新 MIDI 小字, 不重建整个 DOM
   private lyricsVersion: number = 0;
   private renderedKey: string = "";
@@ -246,6 +249,9 @@ export class KaraokeDisplay {
         tokenEl.style.color = "#e6e6e6";
       }
       tokenEl.textContent = text;
+      tokenEl.style.cursor = "pointer";
+      const li = this.lyricsLines.indexOf(line);
+      tokenEl.onclick = () => this.onTokenDebug?.(li, i);
       lyricsRow.appendChild(tokenEl);
     });
 
