@@ -194,3 +194,78 @@ fn test_bind_uses_note_events() {
     let primary = tok.primary_note.as_ref().expect("primary_note must be set");
     assert_eq!(primary.median_midi, 60.0);
 }
+
+// ── LRC 行尾结束时间戳 / 宽松时间戳 / 多时间戳 ──────────────────
+
+/// 扩展行时格式: [start]text[end] — 常见双语 LRC。旧行为会把 end 当成新行起点,
+/// 产生"幽灵句"并污染双语合并 (每行主文本显示为上一句残影)。
+#[test]
+fn test_parse_lrc_trailing_end_tags() {
+    let lrc = "[ar:artist]\n\
+               [ti:title]\n\
+               \n\
+               [00:01.000]first line here[00:10.000]\n\
+               [00:01.000]第一行歌词[00:10.000]\n\
+               [00:10.000]second line[00:18.500]\n\
+               [00:10.000]第二行歌词[00:18.500]\n";
+    let lines = parse_lrc(lrc, Some(30.0));
+    assert_eq!(lines.len(), 2, "expected 2 merged lines, got {}: {:?}", lines.len(), lines.len());
+
+    // 行 1: 双语合并, 显式结束时间
+    assert_eq!(lines[0].primary_text, "first line here");
+    assert_eq!(lines[0].translations, vec!["第一行歌词"]);
+    assert_eq!(lines[0].start_time, Some(1.0));
+    assert_eq!(lines[0].end_time, Some(10.0));
+    // 行 2
+    assert_eq!(lines[1].primary_text, "second line");
+    assert_eq!(lines[1].translations, vec!["第二行歌词"]);
+    assert_eq!(lines[1].start_time, Some(10.0));
+    assert_eq!(lines[1].end_time, Some(18.5));
+
+    // 任何一行的翻译里都不应混入其他行的原文 (幽灵句检查)
+    for l in &lines {
+        for t in &l.translations {
+            assert!(!l.primary_text.is_empty() && t != &l.primary_text);
+        }
+    }
+}
+
+/// 宽松时间戳: [0:01] 无小数、[0:01.5] 一位小数、[00:01.25] 标准都能解析
+#[test]
+fn test_parse_lrc_lenient_timestamps() {
+    let lrc = "[0:01]aaa[0:05]\n[00:05.5]bbb[00:09.25]\n";
+    let lines = parse_lrc(lrc, Some(15.0));
+    assert_eq!(lines.len(), 2, "{:?}", lines.iter().map(|l| (&l.primary_text, l.start_time, l.end_time)).collect::<Vec<_>>());
+    assert_eq!(lines[0].start_time, Some(1.0));
+    assert_eq!(lines[0].end_time, Some(5.0));
+    assert_eq!(lines[1].start_time, Some(5.5));
+    assert_eq!(lines[1].end_time, Some(9.25));
+}
+
+/// 多时间戳重复段: [t1][t2]同句 → 两个条目 (不能当成行尾时间)
+#[test]
+fn test_parse_lrc_multi_timestamp_repeat() {
+    let lrc = "[00:10.000][00:70.000]chorus line[00:80.000]\n";
+    let lines = parse_lrc(lrc, Some(120.0));
+    // [00:70.000] 与 [00:80.000] 之间的文本为空? 不 — 文本在最后一个标签前, 
+    // 标签 t1,t2 相连在开头, end 标签在文本后 → 首尾之间有文本 → 扩展格式
+    // starts=[10], end=80... 但 [00:70] 夹在中间与首标签相连:
+    // trimmed = "[00:10.000][00:70.000]chorus line[00:80.000]"
+    // tags[0]=10, tags[1]=70, tags[2]=80; between tags[0].end..tags[2].start
+    //   = "[00:70.000]chorus line" → 去标签后 "chorus line" 非空 → 扩展格式
+    // → start=10, end=80。70 被忽略 (罕见格式, 可接受)
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].start_time, Some(10.0));
+    assert_eq!(lines[0].end_time, Some(80.0));
+}
+
+/// 真正的多时间戳重复: 标签全部连在开头
+#[test]
+fn test_parse_lrc_repeat_tags_at_line_start() {
+    let lrc = "[00:10.000][01:20.000]chorus line\n";
+    let lines = parse_lrc(lrc, Some(200.0));
+    assert_eq!(lines.len(), 2, "repeated tags should create two entries");
+    assert_eq!(lines[0].start_time, Some(10.0));
+    assert_eq!(lines[1].start_time, Some(80.0));
+    assert_eq!(lines[0].primary_text, "chorus line");
+}

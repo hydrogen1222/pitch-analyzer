@@ -392,3 +392,145 @@ fn median(v: &mut [f32]) -> f32 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     v[v.len() / 2]
 }
+
+// ── 真实 LRC 导入全链路: 解析 → DP 对齐 → 绑定 → 前端逐帧高亮模拟 ──
+
+/// 模拟 KaraokeDisplay.findCurrentLineAndTokenIdx 的查找规则
+fn simulate_display(lines: &[pitch_analyzer_tauri_lib::models::LyricLine], t: f32) -> (usize, usize) {
+    for (li, line) in lines.iter().enumerate() {
+        let (Some(ls), Some(le)) = (line.start_time, line.end_time) else { continue };
+        if t < ls || t > le {
+            continue;
+        }
+        let mut tok = -1i64;
+        for (i, token) in line.tokens.iter().enumerate() {
+            let (Some(ts), Some(te)) = (token.start_time, token.end_time) else { continue };
+            if t >= ts && t <= te {
+                tok = i as i64;
+                break;
+            }
+        }
+        return (li, tok.max(0) as usize);
+    }
+    (usize::MAX, 0)
+}
+
+#[test]
+#[ignore]
+fn real_lrc_full_chain() {
+    pitch_analyzer_tauri_lib::try_init_ort_dylib();
+    let lrc_path = std::env::var("LRC_PATH")
+        .unwrap_or_else(|_| r"C:\Users\tp798\Documents\Lyrics\岡村孝子 - ドラマ (636813).lrc".to_string());
+    let Ok(content) = std::fs::read_to_string(&lrc_path) else {
+        eprintln!("Skipping: LRC not found at {}", lrc_path);
+        return;
+    };
+    let songs = find_songs();
+    let song = songs
+        .iter()
+        .find(|p| p.file_name().unwrap().to_string_lossy().contains("ドラマ"))
+        .expect("ドラマ flac not found in repo root");
+    let Some(cent_table) = load_cent_table() else {
+        eprintln!("Skipping: no model config");
+        return;
+    };
+    let model_path = repo_root().join("models/fcpe.onnx");
+    assert!(model_path.exists());
+
+    // 1. 分析音频
+    let analyzer = PitchAnalyzer::new(model_path.to_str().unwrap(), cent_table).unwrap();
+    let track = run_pipeline(&analyzer, song);
+    let duration = track.times.last().copied().unwrap_or(0.0);
+
+    // 2. 与 load_lyrics_lrc 命令完全相同的流程
+    let mut lines = parse_lrc(&content, Some(duration));
+    println!("parsed lines: {}", lines.len());
+    assert!(!lines.is_empty(), "LRC parsed to nothing");
+    // 双语行: 主文本为日文原文, 翻译为中文, 不应有句子被吞进错误行
+    for (i, l) in lines.iter().enumerate() {
+        println!(
+            "  line {:2} [{:7.2} ~ {:7.2}] {} | trans: {:?}",
+            i,
+            l.start_time.unwrap_or(0.0),
+            l.end_time.unwrap_or(0.0),
+            l.primary_text,
+            l.translations
+        );
+    }
+
+    align_token_times(&mut lines, &track, &TokenAlignParams::default());
+    bind_pitch_to_tokens(&mut lines, &track, 0.3, &NoteTrackingParams::default());
+
+    // 3. 结构不变量: token 时间在行内且单调递增
+    for line in &lines {
+        let (ls, le) = (line.start_time.unwrap(), line.end_time.unwrap());
+        assert!(line.token_timing_auto, "DP/distribute must set timing_auto");
+        for w in line.tokens.windows(2) {
+            assert!(w[1].start_time.unwrap() >= w[0].end_time.unwrap() - 1e-4, "token overlap");
+        }
+        for t in &line.tokens {
+            let (ts, te) = (t.start_time.unwrap(), t.end_time.unwrap());
+            assert!(ts >= ls - 0.2 && te <= le + 0.2, "token outside line bounds");
+            assert!(te - ts >= 0.03, "token too short");
+            assert!(t.text.chars().count() < 20, "token not char-split: {:?}", t.text);
+        }
+    }
+
+    // 4. 前端逐帧模拟: 行必须依次推进, 高亮字必须随时间变化
+    let first_start = lines.first().unwrap().start_time.unwrap();
+    let last_end = lines.last().unwrap().end_time.unwrap();
+    let step = 0.05f32;
+    let mut prev_line = usize::MAX;
+    let mut line_advances = 0usize;
+    let mut line_found_frames = 0usize;
+    let mut t = first_start;
+    while t <= last_end {
+        let (li, _tok) = simulate_display(&lines, t);
+        if li != usize::MAX {
+            line_found_frames += 1;
+            if li != prev_line && prev_line != usize::MAX && li == prev_line + 1 {
+                line_advances += 1;
+            }
+            prev_line = li;
+        }
+        t += step;
+    }
+    println!(
+        "display simulation: {} frames with line, {} line advances (lines: {})",
+        line_found_frames,
+        line_advances,
+        lines.len()
+    );
+    assert!(
+        line_advances >= lines.len() - 2,
+        "lines must advance sequentially; got {} advances for {} lines",
+        line_advances,
+        lines.len()
+    );
+
+    // 5. 每行内高亮字必须变化 (行时长 > 2s 且 token 数 >= 4 时)
+    for (li, line) in lines.iter().enumerate() {
+        let (ls, le) = (line.start_time.unwrap(), line.end_time.unwrap());
+        if le - ls < 2.0 || line.tokens.len() < 4 {
+            continue;
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut t = ls + 0.05;
+        while t <= le - 0.05 {
+            let one_line = [line.clone()];
+            let (_, tok) = simulate_display(&one_line, t);
+            seen.insert(tok);
+            t += 0.05;
+        }
+        println!("  line {}: {} tokens, {} highlight states", li, line.tokens.len(), seen.len());
+        assert!(seen.len() >= (line.tokens.len() as f32 * 0.5).floor() as usize, 
+            "token highlight must advance within line {}: {} states for {} tokens",
+            li, seen.len(), line.tokens.len());
+    }
+
+    // 6. 主音覆盖率
+    let total: usize = lines.iter().map(|l| l.tokens.len()).sum();
+    let bound: usize = lines.iter().flat_map(|l| &l.tokens).filter(|t| t.primary_note.is_some()).count();
+    println!("primary coverage: {}/{} ({:.0}%)", bound, total, 100.0 * bound as f32 / total as f32);
+    assert!(bound as f32 / total as f32 > 0.5, "primary coverage too low");
+}

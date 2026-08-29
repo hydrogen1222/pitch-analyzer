@@ -73,14 +73,28 @@ pub fn parse_txt(text: &str) -> Vec<LyricLine> {
 // ── LRC Parser ─────────────────────────────────────────────
 
 pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
-    let time_re = Regex::new(r"\[(\d{2}):(\d{2}\.\d{2,3})\]")
+    // 宽松时间戳: [mm:ss] / [mm:ss.f] / [mm:ss.ff] / [mm:ss.fff], 分和秒可 1-2 位
+    let time_re = Regex::new(r"\[(\d{1,2}):(\d{1,2})(?:\.(\d{1,3}))?\]")
         .expect("Invalid LRC time regex pattern");
     let word_re = Regex::new(r"<(\d{1,3}):(\d{2})(?:\.(\d{1,3}))?>")
         .expect("Invalid enhanced LRC word regex pattern");
 
+    fn parse_tag_time(cap: &regex::Captures) -> f32 {
+        let mins: f32 = cap[1].parse().unwrap_or(0.0);
+        let s: f32 = cap[2].parse().unwrap_or(0.0);
+        let frac = cap.get(3).map(|f| {
+            let digits = f.as_str();
+            let v: f32 = digits.parse().unwrap_or(0.0);
+            v / 10f32.powi(digits.len() as i32)
+        });
+        mins * 60.0 + s + frac.unwrap_or(0.0)
+    }
+
     #[derive(Debug, Clone)]
     struct RawEntry {
         start_time: f32,
+        /// 扩展行时格式 ([start]text[end]) 自带的结束时间, None = 未提供
+        end_time: Option<f32>,
         text: String,
         /// enhanced LRC 逐字块: (该块起始时间, 块文本)。首块时间为 None。
         chunks: Vec<(Option<f32>, String)>,
@@ -92,14 +106,33 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
         if trimmed.is_empty() {
             continue;
         }
-        let captures: Vec<_> = time_re.captures_iter(trimmed).collect();
-        if captures.is_empty() {
+        let tags: Vec<(f32, usize, usize)> = time_re
+            .captures_iter(trimmed)
+            .filter_map(|c| {
+                let m = c.get(0)?;
+                Some((parse_tag_time(&c), m.start(), m.end()))
+            })
+            .collect();
+        if tags.is_empty() {
             continue;
         }
         let raw_content = time_re.replace_all(trimmed, "").trim().to_string();
         if raw_content.is_empty() {
             continue;
         }
+
+        // 区分两种多标签行:
+        //   扩展行时: [start]text[end]  (首尾标签之间夹着文本) → 一个条目, 带结束时间
+        //   多时间戳: [t1][t2]text      (标签全部连在开头)     → 每个时间戳一个条目
+        let has_text_between = tags.len() >= 2 && {
+            let between = &trimmed[tags[0].2..tags[tags.len() - 1].1];
+            !time_re.replace_all(between, "").trim().is_empty()
+        };
+        let (starts, explicit_end): (Vec<f32>, Option<f32>) = if has_text_between {
+            (vec![tags[0].0], Some(tags[tags.len() - 1].0))
+        } else {
+            (tags.iter().map(|(t, _, _)| *t).collect(), None)
+        };
 
         // 切分 enhanced LRC 逐字块: <00:12.00>如<00:12.50>果
         let mut chunks: Vec<(Option<f32>, String)> = Vec::new();
@@ -145,12 +178,10 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
             continue;
         }
 
-        for cap in &captures {
-            let mins: f32 = cap[1].parse().unwrap_or(0.0);
-            let secs: f32 = cap[2].parse().unwrap_or(0.0);
-            let time_sec = mins * 60.0 + secs;
+        for &start in &starts {
             entries.push(RawEntry {
-                start_time: time_sec,
+                start_time: start,
+                end_time: explicit_end,
                 text: text_clean.clone(),
                 chunks: chunks.clone(),
             });
@@ -161,6 +192,7 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
     // 合并双语（相同时间戳 ±50ms）
     struct MergedEntry {
         start_time: f32,
+        end_time: Option<f32>,
         text: String,
         translations: Vec<String>,
         chunks: Vec<(Option<f32>, String)>,
@@ -170,11 +202,18 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
         if let Some(last) = merged.last_mut() {
             if (last.start_time - entry.start_time).abs() < 0.05 {
                 last.translations.push(entry.text);
+                // 取更长的结束时间 (双语行通常一致)
+                if entry.end_time.map_or(false, |e| {
+                    last.end_time.map_or(true, |le| e > le)
+                }) {
+                    last.end_time = entry.end_time;
+                }
                 continue;
             }
         }
         merged.push(MergedEntry {
             start_time: entry.start_time,
+            end_time: entry.end_time,
             text: entry.text,
             translations: Vec::new(),
             chunks: entry.chunks,
@@ -184,15 +223,18 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
     let mut lines = Vec::new();
     for (i, entry) in merged.iter().enumerate() {
         let start_time = entry.start_time;
-        let end_time = if i + 1 < merged.len() {
-            let next = merged[i + 1].start_time;
-            if next <= start_time {
-                start_time + 0.1
-            } else {
-                next
-            }
-        } else {
-            audio_duration.unwrap_or(start_time + 0.1)
+        let next_start = merged.get(i + 1).map(|m| m.start_time);
+        // 行结束时间: 优先用扩展行时自带的 end (不越过下一行起点);
+        // 否则用下一行起点, 最后一行用音频时长
+        let end_time = match entry.end_time {
+            Some(e) if e > start_time => match next_start {
+                Some(ns) if ns > start_time && ns < e => ns,
+                _ => e,
+            },
+            _ => match next_start {
+                Some(next) if next > start_time => next,
+                _ => audio_duration.unwrap_or(start_time + 0.1),
+            },
         };
 
         let primary_text = entry.text.clone();
@@ -392,6 +434,22 @@ pub fn align_token_times(lines: &mut [LyricLine], track: &PitchTrack, params: &T
         } else {
             distribute_line_times(line, start, end);
             line.token_timing_auto = true;
+        }
+        // 行首/行尾裁剪: 前奏或间奏很长时, 发声区域之外的时间歌词会长时间
+        // 静止挂屏; 发声起点超过行首 2s (行尾超过 1s) 就把显示窗口收紧到演唱附近
+        if let Some(first_start) = line.tokens.first().and_then(|t| t.start_time) {
+            if let Some(ls) = line.start_time {
+                if first_start - ls > 2.0 {
+                    line.start_time = Some((first_start - 0.5).max(0.0));
+                }
+            }
+        }
+        if let Some(last_end) = line.tokens.last().and_then(|t| t.end_time) {
+            if let Some(le) = line.end_time {
+                if le - last_end > 1.0 {
+                    line.end_time = Some(last_end + 0.3);
+                }
+            }
         }
     }
 }
