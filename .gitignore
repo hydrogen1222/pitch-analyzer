@@ -80,3 +80,6 @@ test_output/
 /*.mp3
 /*.m4a
 /*.lrc
+
+# GAME 模型 (本地, 不入库)
+models/GAME-*/

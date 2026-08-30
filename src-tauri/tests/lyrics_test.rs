@@ -544,3 +544,80 @@ fn test_zero_overlap_neighbor_not_bound() {
         "unpitched reason must be set"
     );
 }
+
+// ── Round3.1: mora 唯一性 + pitch_notes 时序 ─────────────────────
+
+use pitch_analyzer_tauri_lib::lyrics::build_align_units_debug;
+
+/// UniDic coarse span (二人→ふたり) 的 mora 不得按 display token 复制进
+/// 对齐序列 (任务书 §23): 每个 mora 恰好出现一次
+#[test]
+fn round3_align_units_no_duplicate_moras() {
+    for text in ["二人", "愛", "流れる", "群れ", "知らない二人にもどるのね"] {
+        let mut lines = parse_lrc(&format!("[00:00.000]{}", text), Some(10.0));
+        assert_eq!(lines.len(), 1);
+        let line = &lines[0];
+        let mora_count = line.moras.len();
+        assert!(mora_count > 0, "{} produced no moras", text);
+        let units = build_align_units_debug(line);
+        let mora_ids: Vec<usize> = units.iter().filter_map(|(m, _, _)| *m).collect();
+        let mut sorted_ids = mora_ids.clone();
+        sorted_ids.sort_unstable();
+        sorted_ids.dedup();
+        assert_eq!(
+            sorted_ids.len(),
+            mora_ids.len(),
+            "{}: duplicated mora in align units: {:?}",
+            text,
+            mora_ids
+        );
+        assert_eq!(
+            sorted_ids,
+            (0..mora_count).collect::<Vec<_>>(),
+            "{}: mora ids must be 0..n exactly once",
+            text
+        );
+    }
+}
+
+/// 详细模式的 pitch_notes 必须按时间升序 (HashMap 迭代无序不得泄漏)
+#[test]
+fn round3_pitch_notes_chronological() {
+    let times: Vec<f32> = (0..200).map(|i| i as f32 * 0.01).collect();
+    let mk = |start: f32, end: f32, midi: i32| NoteEvent {
+        start,
+        end,
+        midi,
+        note_name: String::new(),
+        confidence: 0.9,
+        center_midi: Some(midi as f32),
+        stable_duration: end - start,
+        gestures: Vec::new(),
+        tracker_version: 2,
+    };
+    // 故意乱序构造 note_events (HashMap 迭代顺序不可控, 因此直接乱序输入)
+    let track = PitchTrack {
+        times,
+        frequencies: vec![261.63; 200],
+        confidences: vec![0.9; 200],
+        midis: vec![f32::NAN; 200],
+        rms: Vec::new(),
+        flux: Vec::new(),
+        note_events: vec![mk(0.6, 1.0, 67), mk(0.0, 0.2, 60), mk(0.2, 0.6, 64)],
+    };
+    let mut lines = parse_lrc("[00:00.000]ああ", Some(2.0));
+    distribute_token_times(&mut lines);
+    bind_pitch_to_tokens(&mut lines, &track, 0.3, &NoteTrackingParams::default());
+    let tok = &lines[0].tokens[0];
+    assert!(tok.pitch_notes.len() >= 2, "melisma expected: {:?}", tok.pitch_notes);
+    for w in tok.pitch_notes.windows(2) {
+        assert!(
+            w[0].start_time <= w[1].start_time,
+            "pitch_notes must be chronological: {:?}",
+            tok.pitch_notes
+        );
+    }
+    // primary 仍应是覆盖最长的 E4 (0.2-0.6 = 0.4s)
+    let primary = tok.primary_note.as_ref().unwrap();
+    assert_eq!(primary.rounded_midi, 64, "primary must be E4");
+}

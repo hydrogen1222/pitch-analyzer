@@ -637,48 +637,78 @@ pub fn align_token_times(lines: &mut [LyricLine], track: &PitchTrack, params: &T
     }
 }
 
-/// 一个声学对齐单元: 已知 mora (假名) 或未知读音片段 (汉字/拉丁, 时长先验)。
-/// 显示 token 可包含多个 unit (位 → く・ら・い 共 3 个 mora unit)。
+/// 一个声学对齐单元: 已知 mora (每个 mora 在整行序列中恰好出现一次)
+/// 或无读音片段 (汉字无词典读音/拉丁/数字) 的时长先验。
+///
+/// Round3.1 修复 (任务书 §5-6): 旧实现按 display token overlap 展开 mora,
+/// UniDic 的 coarse span (二人→ふたり) 会让同一 mora 相交多个 token 而被
+/// 复制多次 (3 mora → 6 unit), 扭曲时长先验与 DP 边界。
+/// 现在 mora 是对齐主体; display token 时间在回填阶段按 span 重新聚合。
 #[derive(Debug, Clone)]
 struct AlignUnit {
+    /// 原文排序键 (mora 的 char 起点 / fallback token 的 char 起点)
+    sort_char: usize,
+    /// 关联 display token (fallback unit 的时间回填目标;
+    /// mora unit 的时间回填按 span 相交另行聚合, 不依赖此字段)
     token_idx: usize,
     weight: f32,
-    /// 读音已知 (假名 mora) = true; 启发式先验 (汉字/拉丁) = false
+    /// 读音已知 (词典/kana mora) = true; 时长先验 = false
     known: bool,
     mora_idx: Option<usize>,
 }
 
-/// 从显示 token + moras 构建 DP 单元序列。
-/// 假名 token 拆成逐 mora unit; 无假名 token (汉字/拉丁) 退化为单个先验 unit。
+/// 从 moras (主体, 每个恰好一次) + 无读音 token (先验) 构建 DP 单元序列,
+/// 按原文 char 顺序排序。
 fn build_align_units(line: &LyricLine) -> Vec<AlignUnit> {
-    let mut units = Vec::new();
-    for (ti, token) in line.tokens.iter().enumerate() {
-        let token_moras: Vec<usize> = line
-            .moras
+    let mut units: Vec<AlignUnit> = Vec::new();
+    // 1) 已知 mora: 每个恰好一个 unit, 归属到相交的 display token
+    //    (coarse span 相交多个 token 时归属第一个; 时间回填按 span 聚合)
+    let mut covered = vec![false; line.tokens.len()];
+    for (mi, mora) in line.moras.iter().enumerate() {
+        let token_idx = line
+            .tokens
             .iter()
-            .enumerate()
-            .filter(|(_, m)| token.char_start < m.char_end && m.char_start < token.char_end)
-            .map(|(mi, _)| mi)
-            .collect();
-        if token_moras.is_empty() {
-            units.push(AlignUnit {
-                token_idx: ti,
-                weight: token_weight(&token.text),
-                known: false,
-                mora_idx: None,
-            });
-        } else {
-            for mi in token_moras {
-                units.push(AlignUnit {
-                    token_idx: ti,
-                    weight: 1.0,
-                    known: true,
-                    mora_idx: Some(mi),
-                });
-            }
+            .position(|t| mora.char_start < t.char_end && t.char_start < mora.char_end);
+        if let Some(ti) = token_idx {
+            covered[ti] = true;
         }
+        units.push(AlignUnit {
+            sort_char: mora.char_start,
+            token_idx: token_idx.unwrap_or(usize::MAX),
+            weight: 1.0,
+            known: true,
+            mora_idx: Some(mi),
+        });
     }
+    // 2) 无 mora 覆盖的 token (读音未知/拉丁/数字): 时长先验 unit
+    for (ti, token) in line.tokens.iter().enumerate() {
+        if covered[ti] {
+            continue;
+        }
+        units.push(AlignUnit {
+            sort_char: token.char_start,
+            token_idx: ti,
+            weight: token_weight(&token.text),
+            known: false,
+            mora_idx: None,
+        });
+    }
+    // 3) 原文顺序
+    units.sort_by(|a, b| {
+        a.sort_char
+            .partial_cmp(&b.sort_char)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.mora_idx.unwrap_or(usize::MAX).cmp(&b.mora_idx.unwrap_or(usize::MAX)))
+    });
     units
+}
+
+/// 测试/调试辅助: 返回 (mora_idx, token_idx, known) 序列 (任务书 §23)
+pub fn build_align_units_debug(line: &LyricLine) -> Vec<(Option<usize>, usize, bool)> {
+    build_align_units(line)
+        .into_iter()
+        .map(|u| (u.mora_idx, u.token_idx, u.known))
+        .collect()
 }
 
 /// 基于声学特征的句内 mora 对齐 (任务书 P2)。
@@ -898,35 +928,72 @@ fn dp_align_line(
             }
         }
     }
-    // 回填 token 时间 (其 units 的首尾) 与对齐置信度 (已知读音权重占比)
+    // 回填 token 时间:
+    //   - token 的 char 区间相交的 moras → [min start, max end]
+    //     (coarse span 的 moras 会同时覆盖多个 token, 各 token 取自己的区间)
+    //   - 无 mora 覆盖的 token → fallback unit 的时间
     let n_tokens = line.tokens.len();
     let mut token_first = vec![None; n_tokens];
     let mut token_last = vec![None; n_tokens];
+    let mut token_has_mora = vec![false; n_tokens];
+    for (mi, mora) in line.moras.iter().enumerate() {
+        let Some(&(us, ue)) = unit_times.get(mi) else {
+            continue;
+        };
+        let _ = mi;
+        for (ti, token) in line.tokens.iter().enumerate() {
+            if mora.char_start < token.char_end && token.char_start < mora.char_end {
+                token_has_mora[ti] = true;
+                let f = &mut token_first[ti];
+                if f.map_or(true, |v| us < v) {
+                    *f = Some(us);
+                }
+                let l = &mut token_last[ti];
+                if l.map_or(true, |v| ue > v) {
+                    *l = Some(ue);
+                }
+            }
+        }
+    }
     let mut token_known_w = vec![0.0f32; n_tokens];
     let mut token_total_w = vec![0.0f32; n_tokens];
-    for (u, &(us, ue)) in units.iter().zip(&unit_times) {
-        let ti = u.token_idx;
-        if token_first[ti].is_none() {
-            token_first[ti] = Some(us);
+    for (u, _) in units.iter().zip(unit_times.iter()) {
+        if u.mora_idx.is_none() && u.token_idx < n_tokens {
+            let ti = u.token_idx;
+            token_total_w[ti] += u.weight;
         }
-        token_last[ti] = Some(ue);
-        token_total_w[ti] += u.weight;
-        if u.known {
-            token_known_w[ti] += u.weight;
+    }
+    for (u, &(us, ue)) in units.iter().zip(&unit_times) {
+        if u.mora_idx.is_none() && u.token_idx < n_tokens && !token_has_mora[u.token_idx] {
+            token_known_w[u.token_idx] += u.weight; // unknown 权重, 占位使 confidence=0
         }
     }
     for (ti, token) in line.tokens.iter_mut().enumerate() {
-        if let (Some(s), Some(e)) = (token_first[ti], token_last[ti]) {
+        let times = if token_has_mora[ti] {
+            match (token_first[ti], token_last[ti]) {
+                (Some(s), Some(e)) => Some((s, e)),
+                _ => None,
+            }
+        } else {
+            // fallback unit: 从 unit_times 里找该 token 的先验 unit
+            units.iter()
+                .zip(unit_times.iter())
+                .find(|(u, _)| u.mora_idx.is_none() && u.token_idx == ti)
+                .map(|(_, &(s, e))| (s, e))
+        };
+        if let Some((s, e)) = times {
             token.start_time = Some(s);
             token.end_time = Some(e);
             token.alignment_source = Some(AlignmentSource::MoraDp);
-            token.alignment_confidence = if token_total_w[ti] > 0.0 {
-                token_known_w[ti] / token_total_w[ti]
+            token.alignment_confidence = if token_has_mora[ti] {
+                1.0
             } else {
-                0.0
+                0.0 // 无读音 → 先验, 置信度 0
             };
         }
     }
+    let _ = token_known_w;
+    let _ = token_total_w;
     true
 }
 
@@ -1128,11 +1195,18 @@ fn bind_line_at_mora_level(
             notes.push(note_event_to_pitch_note(ev, rs, re_));
             scores.push(primary_score(ev, total_ov));
         }
+        // 详细模式的 → 箭头必须按时间顺序 (HashMap 迭代无序, 任务书 §9);
+        // primary 按覆盖x置信x稳定评分独立重选, 不依赖排序前下标
         let mut order: Vec<usize> = (0..notes.len()).collect();
-        order.sort_by(|&a, &b| scores[b].partial_cmp(&scores[a]).unwrap_or(Ordering::Equal));
-        let primary = order[0];
-        token.pitch_notes = notes;
-        token.primary_note = Some(token.pitch_notes[primary].clone());
+        order.sort_by(|&a, &b| notes[a].start_time.partial_cmp(&notes[b].start_time).unwrap_or(Ordering::Equal));
+        let sorted_notes: Vec<PitchNote> = order.iter().map(|&i| notes[i].clone()).collect();
+        let sorted_scores: Vec<f32> = order.iter().map(|&i| scores[i]).collect();
+        token.pitch_notes = sorted_notes;
+        token.primary_note = sorted_scores
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
+            .map(|(i, _)| token.pitch_notes[i].clone());
         token.unpitched_reason = None;
     }
 }
@@ -1173,10 +1247,15 @@ fn bind_line_at_token_level(
             scores.push(primary_score(ev, *ov));
         }
         let mut order: Vec<usize> = (0..notes.len()).collect();
-        order.sort_by(|&a, &b| scores[b].partial_cmp(&scores[a]).unwrap_or(Ordering::Equal));
-        let primary = order[0];
-        token.pitch_notes = notes;
-        token.primary_note = Some(token.pitch_notes[primary].clone());
+        order.sort_by(|&a, &b| notes[a].start_time.partial_cmp(&notes[b].start_time).unwrap_or(Ordering::Equal));
+        let sorted_notes: Vec<PitchNote> = order.iter().map(|&i| notes[i].clone()).collect();
+        let sorted_scores: Vec<f32> = order.iter().map(|&i| scores[i]).collect();
+        token.pitch_notes = sorted_notes;
+        token.primary_note = sorted_scores
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
+            .map(|(i, _)| token.pitch_notes[i].clone());
         token.unpitched_reason = None;
     }
 }
