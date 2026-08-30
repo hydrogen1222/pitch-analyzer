@@ -123,6 +123,25 @@ impl PitchAnalyzer {
         let _ = n_mels; // 防止 unused warning
         progress_cb(1.0, "分析完成");
 
+        // canonical musical notes: v2 引擎输出转换 (source 明确标注)
+        // Round3.1-C4 起 GAME 可用时 source=Game 并替换此转换
+        let musical_notes: Vec<crate::note_engine::MusicalNoteEvent> = note_events
+            .iter()
+            .enumerate()
+            .map(|(i, e)| crate::note_engine::MusicalNoteEvent {
+                id: i as u32,
+                start: e.start,
+                end: e.end,
+                midi_float: e.center_midi.unwrap_or(e.midi as f32),
+                midi_rounded: e.midi,
+                note_name: e.note_name.clone(),
+                confidence: e.confidence,
+                source: crate::note_engine::MusicalNoteSource::LegacyFcpeTracker,
+                boundary_confidence: None,
+                is_slur: None,
+            })
+            .collect();
+
         Ok(PitchTrack {
             times,
             frequencies,
@@ -131,6 +150,9 @@ impl PitchAnalyzer {
             rms,
             note_events,
             flux,
+            musical_notes,
+            musical_note_source: crate::note_engine::MusicalNoteSource::LegacyFcpeTracker,
+            musical_note_model: Some("notetracker-v2".to_string()),
         })
     }
 }

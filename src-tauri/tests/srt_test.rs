@@ -15,6 +15,7 @@ fn mock_track() -> PitchTrack {
         rms: Vec::new(),
         flux: Vec::new(),
         note_events: Vec::new(),
+        ..Default::default()
     }
 }
 

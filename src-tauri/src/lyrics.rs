@@ -2,6 +2,7 @@
 
 use crate::japanese::reading::JapaneseReadingProvider;
 use crate::japanese::{mora, phoneme, KanaOnlyProvider};
+use crate::note_engine::NoteWindow;
 use crate::models::{
     AlignmentSource, LyricLine, LyricToken, MoraUnit, NoteEvent, NoteTrackingParams, PitchNote,
     PitchTrack, UnpitchedReason,
@@ -1053,12 +1054,18 @@ pub fn bind_pitch_to_tokens(
             continue;
         }
 
+        // canonical 优先: GAME/canonical musical_notes; 旧工程回退 legacy note_events
         let mora_timing = line.moras.iter().any(|m| m.start_time.is_some());
-        if mora_timing {
-            // B2: mora 层 many-to-many 绑定 -> 聚合到 token
-            bind_line_at_mora_level(line, pitch_track, confidence_threshold);
+        if !pitch_track.musical_notes.is_empty() {
+            if mora_timing {
+                bind_line_at_mora_level(line, &pitch_track.musical_notes, pitch_track, confidence_threshold);
+            } else {
+                bind_line_at_token_level(line, &pitch_track.musical_notes, pitch_track, confidence_threshold);
+            }
+        } else if mora_timing {
+            bind_line_at_mora_level(line, &pitch_track.note_events, pitch_track, confidence_threshold);
         } else {
-            bind_line_at_token_level(line, pitch_track, confidence_threshold);
+            bind_line_at_token_level(line, &pitch_track.note_events, pitch_track, confidence_threshold);
         }
     }
 }
@@ -1068,22 +1075,24 @@ fn admission_min_overlap(window: f32, note: f32) -> f32 {
     (0.25 * window.min(note)).clamp(0.010, 0.030)
 }
 
-/// 单窗口的候选准入: 返回 (event_idx, 真实重叠, r_token, r_note, score)
-fn admit_events_for_window(
-    events: &[NoteEvent],
+/// 单窗口的候选准入: 返回 (event_idx, 真实重叠, r_token, r_note, score)。
+/// 泛型: canonical MusicalNoteEvent 与 legacy NoteEvent 通用。
+fn admit_events_for_window<T: NoteWindow>(
+    events: &[T],
     w_start: f32,
     w_end: f32,
 ) -> Vec<(usize, f32, f32, f32, f32)> {
     let window = (w_end - w_start).max(1e-3);
     let mut out = Vec::new();
     for (i, ev) in events.iter().enumerate() {
-        let rs = ev.start.max(w_start);
-        let re_ = ev.end.min(w_end);
+        let (ev_start, ev_end) = ev.window();
+        let rs = ev_start.max(w_start);
+        let re_ = ev_end.min(w_end);
         let ov = (re_ - rs).max(0.0);
         if ov <= 0.0 {
             continue; // 零真实重叠: 不准入 (debug 近邻建议不进入正式绑定)
         }
-        let note_dur = ev.duration().max(1e-3);
+        let note_dur = (ev_end - ev_start).max(1e-3);
         let r_tok = ov / window;
         let r_note = ov / note_dur;
         let min_ov = admission_min_overlap(window, note_dur);
@@ -1093,26 +1102,22 @@ fn admit_events_for_window(
         if r_tok < 0.12 && r_note < 0.12 {
             continue;
         }
-        let score = 0.55 * r_tok + 0.30 * r_note + 0.15 * ev.confidence;
+        let score = 0.55 * r_tok + 0.30 * r_note + 0.15 * ev.confidence();
         out.push((i, ov, r_tok, r_note, score));
     }
     out
 }
 
 /// primary 选择: 真实覆盖时长 x 置信度 x 稳定度 (4.4)
-fn primary_score(ev: &NoteEvent, ov_real: f32) -> f32 {
-    let stability = if ev.duration() > 1e-3 && ev.stable_duration > 0.0 {
-        (ev.stable_duration / ev.duration()).clamp(0.5, 1.0)
-    } else {
-        1.0
-    };
-    ov_real * ev.confidence * stability
+fn primary_score<T: NoteWindow>(ev: &T, ov_real: f32) -> f32 {
+    ov_real * ev.confidence() * ev.stability()
 }
 
 /// mora 层绑定 (优先): mora 时间来自 DP 对齐, 绑定结果落盘到
 /// mora.note_bindings, 再聚合出 token 的 pitch_notes / primary_note。
-fn bind_line_at_mora_level(
+fn bind_line_at_mora_level<T: NoteWindow>(
     line: &mut LyricLine,
+    events: &[T],
     pitch_track: &PitchTrack,
     confidence_threshold: f32,
 ) {
@@ -1122,7 +1127,7 @@ fn bind_line_at_mora_level(
         let (Some(ms), Some(me)) = (mora.start_time, mora.end_time) else {
             continue;
         };
-        let cands = admit_events_for_window(&pitch_track.note_events, ms, me);
+        let cands = admit_events_for_window(events, ms, me);
         for (idx, ov, r_tok, r_note, score) in cands {
             mora.note_bindings.push(crate::models::NoteBinding {
                 note_event_index: idx,
@@ -1165,7 +1170,7 @@ fn bind_line_at_mora_level(
         let t_start0 = token.start_time.unwrap();
         let t_end0 = token.end_time.unwrap();
         for (idx, ov, _, _, _) in
-            admit_events_for_window(&pitch_track.note_events, t_start0, t_end0)
+            admit_events_for_window(events, t_start0, t_end0)
         {
             let e = event_best.entry(idx).or_insert(0.0);
             if *e < ov {
@@ -1189,10 +1194,11 @@ fn bind_line_at_mora_level(
         let mut notes: Vec<PitchNote> = Vec::new();
         let mut scores: Vec<f32> = Vec::new();
         for (idx, total_ov) in event_best {
-            let ev = &pitch_track.note_events[idx];
-            let rs = ev.start.max(t_start);
-            let re_ = ev.end.min(t_end);
-            notes.push(note_event_to_pitch_note(ev, rs, re_));
+            let ev = &events[idx];
+            let (ev_start, ev_end) = ev.window();
+            let rs = ev_start.max(t_start);
+            let re_ = ev_end.min(t_end);
+            notes.push(note_window_to_pitch_note(ev, rs, re_));
             scores.push(primary_score(ev, total_ov));
         }
         // 详细模式的 → 箭头必须按时间顺序 (HashMap 迭代无序, 任务书 §9);
@@ -1212,8 +1218,9 @@ fn bind_line_at_mora_level(
 }
 
 /// token 层直接绑定 (无 mora 时间时: 纯汉字/拉丁/中文行)
-fn bind_line_at_token_level(
+fn bind_line_at_token_level<T: NoteWindow>(
     line: &mut LyricLine,
+    events: &[T],
     pitch_track: &PitchTrack,
     confidence_threshold: f32,
 ) {
@@ -1225,7 +1232,7 @@ fn bind_line_at_token_level(
                 continue;
             }
         };
-        let cands = admit_events_for_window(&pitch_track.note_events, t_start, t_end);
+        let cands = admit_events_for_window(events, t_start, t_end);
         if cands.is_empty() {
             token.pitch_notes.clear();
             token.primary_note = None;
@@ -1240,10 +1247,11 @@ fn bind_line_at_token_level(
         let mut notes: Vec<PitchNote> = Vec::new();
         let mut scores: Vec<f32> = Vec::new();
         for (idx, ov, _, _, _) in &cands {
-            let ev = &pitch_track.note_events[*idx];
-            let rs = ev.start.max(t_start);
-            let re_ = ev.end.min(t_end);
-            notes.push(note_event_to_pitch_note(ev, rs, re_));
+            let ev = &events[*idx];
+            let (ev_start, ev_end) = ev.window();
+            let rs = ev_start.max(t_start);
+            let re_ = ev_end.min(t_end);
+            notes.push(note_window_to_pitch_note(ev, rs, re_));
             scores.push(primary_score(ev, *ov));
         }
         let mut order: Vec<usize> = (0..notes.len()).collect();
@@ -1289,6 +1297,21 @@ fn unpitched_reason_for(
         UnpitchedReason::LowPitchConfidence
     } else {
         UnpitchedReason::NoOverlappingNote
+    }
+}
+
+/// 泛型音符 → PitchNote (binder 展示层结构)
+fn note_window_to_pitch_note<T: NoteWindow>(ev: &T, start: f32, end: f32) -> PitchNote {
+    let dur = (end - start).max(0.0);
+    let f = ev.midi_float();
+    PitchNote {
+        start_time: start,
+        end_time: end,
+        median_midi: f,
+        mean_midi: f,
+        rounded_midi: ev.midi_rounded(),
+        confidence_mean: ev.confidence(),
+        point_count: (dur / 0.01).round().max(1.0) as usize,
     }
 }
 

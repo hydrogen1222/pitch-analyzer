@@ -119,6 +119,7 @@ fn test_align_clamps_to_voiced_window() {
         rms: vec![0.0; n],
         note_events: Vec::new(),
         flux: Vec::new(),
+        ..Default::default()
     };
 
     let mut lines = parse_lrc("[00:00.50]你好呀", Some(2.0));
@@ -173,6 +174,7 @@ fn test_align_skips_existing_times() {
         rms: Vec::new(),
         note_events: Vec::new(),
         flux: Vec::new(),
+        ..Default::default()
     };
     let mut lines = parse_lrc("[00:00.50]你好呀", Some(2.0));
     // 手工设置逐字时间，模拟 enhanced LRC
@@ -214,6 +216,7 @@ fn test_bind_uses_note_events() {
             gestures: Vec::new(),
             tracker_version: 2,
         }],
+        ..Default::default()
     };
     let mut lines = parse_lrc("[00:01.00]Test", Some(5.0));
     // 手工给 token 时间，避免依赖均匀分配
@@ -444,6 +447,7 @@ fn test_melisma_token_binding() {
         rms: Vec::new(),
         note_events: Vec::new(),
         flux: Vec::new(),
+        ..Default::default()
     };
     let mut lines = parse_lrc("[00:00.000]ああ", Some(1.0));
     distribute_token_times(&mut lines);
@@ -490,6 +494,7 @@ fn test_melisma_binding_v2_events() {
         rms: Vec::new(),
         flux: Vec::new(),
         note_events: vec![mk(0.0, 0.2, 60), mk(0.2, 1.0, 64)],
+        ..Default::default()
     };
     let mut lines = parse_lrc("[00:00.000]ああ", Some(1.0));
     distribute_token_times(&mut lines);
@@ -529,6 +534,7 @@ fn test_zero_overlap_neighbor_not_bound() {
         flux: Vec::new(),
         // 事件在 token 窗口 [0, 0.5] 之外 18ms 处结束 (零重叠)
         note_events: vec![mk(0.0, 0.518, 62)],
+        ..Default::default()
     };
     let mut lines = parse_lrc("[00:00.518]あ", Some(1.0));
     distribute_token_times(&mut lines);
@@ -554,7 +560,7 @@ use pitch_analyzer_tauri_lib::lyrics::build_align_units_debug;
 #[test]
 fn round3_align_units_no_duplicate_moras() {
     for text in ["二人", "愛", "流れる", "群れ", "知らない二人にもどるのね"] {
-        let mut lines = parse_lrc(&format!("[00:00.000]{}", text), Some(10.0));
+        let lines = parse_lrc(&format!("[00:00.000]{}", text), Some(10.0));
         assert_eq!(lines.len(), 1);
         let line = &lines[0];
         let mora_count = line.moras.len();
@@ -604,6 +610,7 @@ fn round3_pitch_notes_chronological() {
         rms: Vec::new(),
         flux: Vec::new(),
         note_events: vec![mk(0.6, 1.0, 67), mk(0.0, 0.2, 60), mk(0.2, 0.6, 64)],
+        ..Default::default()
     };
     let mut lines = parse_lrc("[00:00.000]ああ", Some(2.0));
     distribute_token_times(&mut lines);

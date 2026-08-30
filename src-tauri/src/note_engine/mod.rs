@@ -21,6 +21,67 @@ pub enum MusicalNoteSource {
     ImportedMidi,
 }
 
+impl Default for MusicalNoteSource {
+    fn default() -> Self {
+        MusicalNoteSource::LegacyFcpeTracker
+    }
+}
+
+/// Binder / matcher 的统一音符窗口抽象: canonical MusicalNoteEvent 与
+/// legacy NoteEvent 都能进入同一套准入/绑定逻辑
+pub trait NoteWindow {
+    fn window(&self) -> (f32, f32);
+    fn confidence(&self) -> f32;
+    fn midi_float(&self) -> f32;
+    fn midi_rounded(&self) -> i32;
+    /// 稳定占比 (stable/duration); 无该概念的实现返回 1.0
+    fn stability(&self) -> f32 {
+        1.0
+    }
+}
+
+impl NoteWindow for MusicalNoteEvent {
+    fn window(&self) -> (f32, f32) {
+        (self.start, self.end)
+    }
+    fn confidence(&self) -> f32 {
+        self.confidence
+    }
+    fn midi_float(&self) -> f32 {
+        self.midi_float
+    }
+    fn midi_rounded(&self) -> i32 {
+        self.midi_rounded
+    }
+    fn stability(&self) -> f32 {
+        // GAME 输出本身就是稳定平台
+        1.0
+    }
+}
+
+impl NoteWindow for crate::models::NoteEvent {
+    fn window(&self) -> (f32, f32) {
+        (self.start, self.end)
+    }
+    fn confidence(&self) -> f32 {
+        self.confidence
+    }
+    fn midi_float(&self) -> f32 {
+        self.center_midi.unwrap_or(self.midi as f32)
+    }
+    fn midi_rounded(&self) -> i32 {
+        self.midi
+    }
+    fn stability(&self) -> f32 {
+        let dur = self.duration().max(1e-3);
+        if self.stable_duration > 0.0 {
+            (self.stable_duration / dur).clamp(0.5, 1.0)
+        } else {
+            1.0
+        }
+    }
+}
+
 /// 音乐音符事件 (Musical Note Track 核心数据结构)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MusicalNoteEvent {

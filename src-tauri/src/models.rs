@@ -11,9 +11,19 @@ pub struct PitchTrack {
     /// 逐帧(10ms) RMS 包络，与 times 对齐，供歌词字级对齐使用
     #[serde(default)]
     pub rms: Vec<f32>,
-    /// 离散稳定音符事件 (Annotation Note Track)
+    /// [legacy/兼容] NoteTracker 产出的事件 (旧工程字段, 保留读取;
+    /// canonical musical notes 见 musical_notes)
     #[serde(default)]
     pub note_events: Vec<NoteEvent>,
+    /// canonical musical note track (GAME 或 LegacyFcpeTracker 产出,
+    /// 来源由 musical_note_source 明确标注, 不允许静默混淆)
+    #[serde(default)]
+    pub musical_notes: Vec<crate::note_engine::MusicalNoteEvent>,
+    #[serde(default)]
+    pub musical_note_source: crate::note_engine::MusicalNoteSource,
+    /// 产生 canonical notes 的模型标识 (如 "GAME-1.0.3-small")
+    #[serde(default)]
+    pub musical_note_model: Option<String>,
     /// 逐帧 log-mel 谱通量 (相邻帧 L1 距离)，音素/音节边界的声学证据。
     /// 与 times 对齐；旧工程文件缺省为空。
     #[serde(default)]
@@ -250,6 +260,23 @@ pub struct PitchNote {
 }
 
 /// 一个字在句内的时间范围与音高绑定结果
+impl Default for PitchTrack {
+    fn default() -> Self {
+        Self {
+            times: Vec::new(),
+            frequencies: Vec::new(),
+            confidences: Vec::new(),
+            midis: Vec::new(),
+            rms: Vec::new(),
+            note_events: Vec::new(),
+            flux: Vec::new(),
+            musical_notes: Vec::new(),
+            musical_note_source: Default::default(),
+            musical_note_model: None,
+        }
+    }
+}
+
 /// 对齐结果的来源 (优先级从高到低: EnhancedLrc > ForcedAlign > MoraDp > WeightedFallback)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlignmentSource {
