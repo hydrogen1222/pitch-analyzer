@@ -57,7 +57,7 @@ impl JapaneseReadingProvider for LinderaUnidicProvider {
 
     fn analyze(&self, text: &str) -> Result<Vec<ReadingSpan>, String> {
         let segmenter = get_segmenter().map_err(|e| e.to_string())?;
-        
+
         let mut tokens = segmenter
             .segment(std::borrow::Cow::Borrowed(text))
             .map_err(|e| format!("UniDic 分词失败: {}", e))?;
@@ -81,19 +81,30 @@ impl JapaneseReadingProvider for LinderaUnidicProvider {
             let byte_start = token.byte_start;
             let byte_end = token.byte_end;
             let char_start = char_of_byte.get(byte_start).copied().unwrap_or(0);
-            let char_end = char_of_byte.get(byte_end).copied().unwrap_or(char_start + surface.chars().count());
+            let char_end = char_of_byte
+                .get(byte_end)
+                .copied()
+                .unwrap_or(char_start + surface.chars().count());
 
             // UniDic features:
             // POS(0..5), lemma_reading(6), lemma(7), reading(8/11), pronunciation(9), ...
             let feats = token.details();
             let raw_pron = feats.get(9).copied().unwrap_or("*");
-            let raw_read = feats.get(6).or_else(|| feats.get(11)).or_else(|| feats.get(8)).copied().unwrap_or("*");
+            let raw_read = feats
+                .get(6)
+                .or_else(|| feats.get(11))
+                .or_else(|| feats.get(8))
+                .copied()
+                .unwrap_or("*");
 
             let pronunciation_str = if raw_pron != "*" && !raw_pron.is_empty() {
                 katakana_to_hiragana(raw_pron)
             } else if raw_read != "*" && !raw_read.is_empty() {
                 katakana_to_hiragana(raw_read)
-            } else if surface.chars().all(|c| mora::is_kana_char(c) || c == '\u{30FC}') {
+            } else if surface
+                .chars()
+                .all(|c| mora::is_kana_char(c) || c == '\u{30FC}')
+            {
                 surface.clone()
             } else {
                 String::new()
@@ -109,7 +120,10 @@ impl JapaneseReadingProvider for LinderaUnidicProvider {
 
             let confidence = if !pronunciation_str.is_empty() {
                 0.95
-            } else if surface.chars().all(|c| mora::is_kana_char(c) || c == '\u{30FC}') {
+            } else if surface
+                .chars()
+                .all(|c| mora::is_kana_char(c) || c == '\u{30FC}')
+            {
                 1.0
             } else {
                 0.0

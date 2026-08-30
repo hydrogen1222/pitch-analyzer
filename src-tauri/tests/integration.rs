@@ -28,12 +28,20 @@ fn load_test_data() -> Option<TestData> {
     serde_json::from_str(&content).ok()
 }
 
+fn skip_or_fail_in_acceptance(reason: &str) -> bool {
+    if std::env::var("ROUND3_ACCEPTANCE").as_deref() == Ok("1") {
+        panic!("Round3 acceptance resource missing: {reason}");
+    }
+    eprintln!("Skipping integration fixture: {reason}");
+    true
+}
+
 #[test]
 fn test_mel_matches_python() {
     let td = match load_test_data() {
         Some(td) => td,
         None => {
-            eprintln!("Skipping mel test: models/test_data.json not found");
+            skip_or_fail_in_acceptance("models/test_data.json");
             return;
         }
     };
@@ -74,7 +82,7 @@ fn test_onnx_inference_matches_python() {
     let td = match load_test_data() {
         Some(td) => td,
         None => {
-            eprintln!("Skipping ONNX test: models/test_data.json not found");
+            skip_or_fail_in_acceptance("models/test_data.json");
             return;
         }
     };
@@ -96,7 +104,7 @@ fn test_onnx_inference_matches_python() {
         .join("models/fcpe.onnx");
 
     if !model_path.exists() {
-        eprintln!("Skipping ONNX test: model not found at {:?}", model_path);
+        skip_or_fail_in_acceptance(&format!("model not found at {:?}", model_path));
         return;
     }
 
@@ -139,7 +147,7 @@ fn test_decoder_produces_f0() {
     let td = match load_test_data() {
         Some(td) => td,
         None => {
-            eprintln!("Skipping decoder test: models/test_data.json not found");
+            skip_or_fail_in_acceptance("models/test_data.json");
             return;
         }
     };
@@ -198,7 +206,7 @@ fn test_end_to_end_real_audio() {
     pitch_analyzer_tauri_lib::try_init_ort_dylib();
     let audio_path = std::path::Path::new("/tmp/test_vocal.flac");
     if !audio_path.exists() {
-        eprintln!("Skipping e2e test: no /tmp/test_vocal.flac");
+        skip_or_fail_in_acceptance("/tmp/test_vocal.flac");
         return;
     }
     let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -206,7 +214,7 @@ fn test_end_to_end_real_audio() {
         .unwrap()
         .join("models/fcpe.onnx");
     if !model_path.exists() {
-        eprintln!("Skipping e2e test: no model");
+        skip_or_fail_in_acceptance("models/fcpe.onnx");
         return;
     }
 

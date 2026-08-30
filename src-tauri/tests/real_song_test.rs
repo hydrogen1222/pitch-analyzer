@@ -25,6 +25,14 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn skip_or_fail_in_acceptance(reason: &str) -> bool {
+    if std::env::var("ROUND3_ACCEPTANCE").as_deref() == Ok("1") {
+        panic!("Round3 acceptance resource missing: {reason}");
+    }
+    eprintln!("Skipping real-song fixture: {reason}");
+    true
+}
+
 fn find_songs() -> Vec<PathBuf> {
     let root = repo_root();
     let mut songs: Vec<PathBuf> = std::fs::read_dir(&root)
@@ -171,17 +179,17 @@ fn run_pipeline(analyzer: &PitchAnalyzer, path: &Path) -> PitchTrack {
 fn real_songs_acceptance() {
     pitch_analyzer_tauri_lib::try_init_ort_dylib();
     let Some(cent_table) = load_cent_table() else {
-        eprintln!("Skipping: models/fcpe_config.json not found");
+        skip_or_fail_in_acceptance("models/fcpe_config.json");
         return;
     };
     let model_path = repo_root().join("models/fcpe.onnx");
     if !model_path.exists() {
-        eprintln!("Skipping: models/fcpe.onnx not found");
+        skip_or_fail_in_acceptance("models/fcpe.onnx");
         return;
     }
     let songs = find_songs();
     if songs.is_empty() {
-        eprintln!("Skipping: no songs found in repo root");
+        skip_or_fail_in_acceptance("audio fixture in repository root");
         return;
     }
 
@@ -454,7 +462,7 @@ fn real_lrc_full_chain() {
         r"C:\Users\tp798\Documents\Lyrics\岡村孝子 - ドラマ (636813).lrc".to_string()
     });
     let Ok(content) = std::fs::read_to_string(&lrc_path) else {
-        eprintln!("Skipping: LRC not found at {}", lrc_path);
+        skip_or_fail_in_acceptance(&format!("LRC not found at {}", lrc_path));
         return;
     };
     let songs = find_songs();
@@ -463,7 +471,7 @@ fn real_lrc_full_chain() {
         .find(|p| p.file_name().unwrap().to_string_lossy().contains("ドラマ"))
         .expect("ドラマ flac not found in repo root");
     let Some(cent_table) = load_cent_table() else {
-        eprintln!("Skipping: no model config");
+        skip_or_fail_in_acceptance("models/fcpe_config.json");
         return;
     };
     let model_path = repo_root().join("models/fcpe.onnx");

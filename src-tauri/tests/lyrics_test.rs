@@ -1,8 +1,14 @@
-use pitch_analyzer_tauri_lib::lyrics::{
-    align_token_times, bind_pitch_to_tokens, distribute_token_times, parse_lrc, parse_txt,
-    select_primary_note, tokenize,
+use pitch_analyzer_tauri_lib::forced_align::{
+    AlignedMora, ForcedAlignBackend, LineAlignmentResult,
 };
+use pitch_analyzer_tauri_lib::lyrics::{
+    align_token_times, align_token_times_with_backend, bind_pitch_to_tokens,
+    distribute_token_times, parse_lrc, parse_txt, select_primary_note, tokenize,
+};
+use pitch_analyzer_tauri_lib::models::AlignmentSource;
 use pitch_analyzer_tauri_lib::models::{NoteEvent, NoteTrackingParams, PitchNote, PitchTrack};
+use pitch_analyzer_tauri_lib::note_engine::{MusicalNoteEvent, MusicalNoteSource};
+use std::path::Path;
 
 fn pn(midi: f32, start: f32, end: f32, conf: f32) -> PitchNote {
     PitchNote {
@@ -559,7 +565,16 @@ use pitch_analyzer_tauri_lib::lyrics::build_align_units_debug;
 /// 对齐序列 (任务书 §23): 每个 mora 恰好出现一次
 #[test]
 fn round3_align_units_no_duplicate_moras() {
-    for text in ["二人", "愛", "流れる", "群れ", "知らない二人にもどるのね"] {
+    for text in [
+        "愛",
+        "心",
+        "二人",
+        "流れる",
+        "群れ",
+        "知らない二人にもどるのね",
+        "心を引き裂く嵐の中",
+        "流れる人の群れ",
+    ] {
         let lines = parse_lrc(&format!("[00:00.000]{}", text), Some(10.0));
         assert_eq!(lines.len(), 1);
         let line = &lines[0];
@@ -584,6 +599,106 @@ fn round3_align_units_no_duplicate_moras() {
             text
         );
     }
+}
+
+/// Binder must consume canonical musical_notes when both canonical and legacy
+/// compatibility events are present; a stale legacy event must not win.
+#[test]
+fn round3_canonical_note_track_is_primary_binding_source() {
+    let track = PitchTrack {
+        times: (0..100).map(|i| i as f32 * 0.01).collect(),
+        frequencies: vec![440.0; 100],
+        confidences: vec![0.9; 100],
+        midis: vec![69.0; 100],
+        musical_notes: vec![MusicalNoteEvent {
+            id: 0,
+            start: 0.0,
+            end: 1.0,
+            midi_float: 72.0,
+            midi_rounded: 72,
+            note_name: "C5".to_string(),
+            confidence: 0.95,
+            source: MusicalNoteSource::Game,
+            boundary_confidence: Some(0.9),
+            is_slur: Some(false),
+        }],
+        note_events: vec![NoteEvent {
+            start: 0.0,
+            end: 1.0,
+            midi: 60,
+            note_name: "C4".to_string(),
+            confidence: 0.99,
+            center_midi: Some(60.0),
+            stable_duration: 1.0,
+            gestures: Vec::new(),
+            tracker_version: 2,
+        }],
+        ..Default::default()
+    };
+    let mut lines = parse_lrc("[00:00.000]あ", Some(1.0));
+    distribute_token_times(&mut lines);
+    bind_pitch_to_tokens(&mut lines, &track, 0.3, &NoteTrackingParams::default());
+    assert_eq!(
+        lines[0].tokens[0]
+            .primary_note
+            .as_ref()
+            .unwrap()
+            .rounded_midi,
+        72
+    );
+}
+
+struct TestForcedAlign;
+
+impl ForcedAlignBackend for TestForcedAlign {
+    fn name(&self) -> &'static str {
+        "test-forced-align"
+    }
+
+    fn align_line(
+        &self,
+        line: &pitch_analyzer_tauri_lib::models::LyricLine,
+        _track: &PitchTrack,
+        _audio_path: &Path,
+        window_start: f32,
+        window_end: f32,
+    ) -> Result<LineAlignmentResult, String> {
+        let unit = (window_end - window_start) / line.moras.len() as f32;
+        Ok(LineAlignmentResult {
+            line_index: 0,
+            source: AlignmentSource::ForcedAlign,
+            confidence: 0.88,
+            moras: line
+                .moras
+                .iter()
+                .enumerate()
+                .map(|(i, m)| AlignedMora {
+                    mora_index: i,
+                    mora: m.kana.clone(),
+                    start: window_start + i as f32 * unit,
+                    end: window_start + (i + 1) as f32 * unit,
+                    confidence: 0.88,
+                })
+                .collect(),
+        })
+    }
+}
+
+#[test]
+fn round3_forced_align_is_used_before_mora_dp() {
+    let mut lines = parse_lrc("[00:00.000]あい", Some(2.0));
+    align_token_times_with_backend(
+        &mut lines,
+        &PitchTrack::default(),
+        &pitch_analyzer_tauri_lib::lyrics::TokenAlignParams::default(),
+        Some(Path::new("test-audio")),
+        Some(&TestForcedAlign),
+    );
+    assert!(lines[0]
+        .tokens
+        .iter()
+        .all(|token| token.alignment_source == Some(AlignmentSource::ForcedAlign)));
+    assert!(lines[0].moras.iter().all(|m| m.start_time.is_some()));
 }
 
 /// 详细模式的 pitch_notes 必须按时间升序 (HashMap 迭代无序不得泄漏)
@@ -616,7 +731,11 @@ fn round3_pitch_notes_chronological() {
     distribute_token_times(&mut lines);
     bind_pitch_to_tokens(&mut lines, &track, 0.3, &NoteTrackingParams::default());
     let tok = &lines[0].tokens[0];
-    assert!(tok.pitch_notes.len() >= 2, "melisma expected: {:?}", tok.pitch_notes);
+    assert!(
+        tok.pitch_notes.len() >= 2,
+        "melisma expected: {:?}",
+        tok.pitch_notes
+    );
     for w in tok.pitch_notes.windows(2) {
         assert!(
             w[0].start_time <= w[1].start_time,

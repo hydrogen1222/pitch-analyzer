@@ -55,6 +55,9 @@ impl MusicalNoteEngine for LegacyFcpeNoteTracker {
     ) -> Result<Vec<MusicalNoteEvent>, Box<dyn std::error::Error>> {
         // 注意: 若直接从 raw audio 驱动, 需前置 FCPE 提取 F0;
         // 推荐在 pipeline 中使用 transcribe_from_track 共享 F0 特征
-        Err("LegacyFcpeNoteTracker requires pre-extracted F0 track (use transcribe_from_track)".into())
+        Err(
+            "LegacyFcpeNoteTracker requires pre-extracted F0 track (use transcribe_from_track)"
+                .into(),
+        )
     }
 }

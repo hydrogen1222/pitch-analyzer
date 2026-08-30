@@ -1,5 +1,8 @@
 use crate::analyzer::PitchAnalyzer;
+use crate::forced_align::{ForcedAlignBackend, MmsForcedAlignBackend};
 use crate::models::{AnalysisParams, LyricLine, NoteTrackingParams, PitchTrack, ProjectData};
+use crate::note_engine::game::{GameModelPaths, GameNoteEngine};
+use crate::note_engine::{MusicalNoteEngine, MusicalNoteSource};
 use crate::playback::AudioPlayer;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -22,12 +25,90 @@ pub mod playback;
 
 struct AppState {
     analyzer: Mutex<Option<PitchAnalyzer>>,
+    game_engine: Mutex<Option<GameNoteEngine>>,
+    forced_align: Mutex<Option<MmsForcedAlignBackend>>,
     track: Mutex<Option<PitchTrack>>,
     lyrics: Mutex<Vec<LyricLine>>,
     player: Mutex<Option<AudioPlayer>>,
     audio_path: Mutex<Option<String>>,
     /// 当前分析参数 (全局只使用同一套参数)
     analysis_params: Mutex<Option<AnalysisParams>>,
+}
+
+fn find_game_model_dir(app_handle: &tauri::AppHandle, fcpe_model: &Path) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app_handle.path().resource_dir() {
+        candidates.push(resource_dir.join("models").join("GAME-1.0.3-small-onnx"));
+        candidates.push(resource_dir.join("GAME-1.0.3-small-onnx"));
+    }
+    if let Some(parent) = fcpe_model.parent() {
+        candidates.push(parent.join("GAME-1.0.3-small-onnx"));
+        if let Some(grandparent) = parent.parent() {
+            candidates.push(grandparent.join("GAME-1.0.3-small-onnx"));
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("models").join("GAME-1.0.3-small-onnx"));
+            candidates.push(dir.join("../../models/GAME-1.0.3-small-onnx"));
+        }
+    }
+    candidates.push(PathBuf::from("models/GAME-1.0.3-small-onnx"));
+    candidates
+        .into_iter()
+        .find(|dir| GameModelPaths::find_in_dir(dir).is_some())
+}
+
+/// 配置可选的真实 GAME / FA 后端。任何初始化失败都保留 FCPE + MoraDP
+/// 的明确 legacy 回退，不把回退结果标成 Game/ForcedAlign。
+fn configure_optional_engines(
+    app_handle: &tauri::AppHandle,
+    app_state: &AppState,
+    fcpe_model: &Path,
+) {
+    let game =
+        find_game_model_dir(app_handle, fcpe_model).and_then(|dir| match GameNoteEngine::try_load(
+            &dir,
+        ) {
+            Ok(engine) => {
+                eprintln!("Loaded GAME note engine: {}", dir.display());
+                Some(engine)
+            }
+            Err(error) => {
+                eprintln!("GAME model found but unavailable, using legacy fallback: {error}");
+                None
+            }
+        });
+    *app_state.game_engine.lock().unwrap() = game;
+
+    // MMS-FA depends on Python + torchaudio and downloads its acoustic weights
+    // on first use. It is opt-in so a normal packaged install never spawns a
+    // missing interpreter; PITCH_ANALYZER_FA_PYTHON also enables it implicitly.
+    let fa_enabled = std::env::var("PITCH_ANALYZER_FA_ENABLE").ok().as_deref() == Some("1")
+        || std::env::var_os("PITCH_ANALYZER_FA_PYTHON").is_some();
+    let fa = if fa_enabled {
+        let resource_helper = app_handle
+            .path()
+            .resource_dir()
+            .ok()
+            .map(|dir| dir.join("scripts/forced_align_mms.py"));
+        match MmsForcedAlignBackend::from_env_with_helper(resource_helper.as_deref()) {
+            Ok(backend) => {
+                eprintln!(
+                    "Loaded forced-align backend: {}",
+                    backend.helper_path().display()
+                );
+                Some(backend)
+            }
+            Err(error) => {
+                eprintln!("Forced-align backend unavailable, using MoraDP fallback: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    *app_state.forced_align.lock().unwrap() = fa;
 }
 
 fn find_model_files(app_handle: &tauri::AppHandle) -> Option<(PathBuf, PathBuf)> {
@@ -275,6 +356,7 @@ async fn init_analyzer(
     let analyzer = PitchAnalyzer::new(&model_path.to_string_lossy(), cent_table)
         .map_err(|e| format!("初始化 analyzer 失败: {}", e))?;
     *app_state.analyzer.lock().unwrap() = Some(analyzer);
+    configure_optional_engines(&app_handle, &app_state, &model_path);
     // 初始化播放器
     match AudioPlayer::new() {
         Ok(player) => *app_state.player.lock().unwrap() = Some(player),
@@ -311,6 +393,7 @@ async fn init_analyzer_with_paths(
         .map_err(|e| format!("初始化 analyzer 失败: {}", e))?;
 
     *app_state.analyzer.lock().unwrap() = Some(analyzer);
+    configure_optional_engines(&app_handle, &app_state, &mdl_path);
 
     // 初始化播放器
     match AudioPlayer::new() {
@@ -333,7 +416,7 @@ async fn analyze_audio(
 
     let config = params.to_analyzer_config();
 
-    let track = {
+    let mut track = {
         let guard = app_state.analyzer.lock().unwrap();
         let analyzer = guard
             .as_ref()
@@ -353,6 +436,34 @@ async fn analyze_audio(
             .map_err(|e| format!("分析失败: {}", e))?
     };
 
+    // FCPE 连续 F0 仍是底层事实源；若完整 GAME 模型可用，则用真实
+    // encoder→segmenter→bd2dur→estimator 结果替换 canonical musical_notes。
+    // GAME 失败时保留 analyzer 已构造的 LegacyFcpeTracker 音符。
+    let game_attempt = {
+        let guard = app_state.game_engine.lock().unwrap();
+        guard.as_ref().map(|engine| {
+            let decoded =
+                crate::audio::load_audio_mono(Path::new(&audio_path), engine.target_sample_rate())
+                    .map_err(|e| e.to_string())?;
+            let notes = engine
+                .transcribe(&decoded.samples, decoded.sample_rate, None)
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>((notes, engine.model_tag().to_string()))
+        })
+    };
+    if let Some(result) = game_attempt {
+        match result {
+            Ok((notes, model)) => {
+                track.musical_notes = notes;
+                track.musical_note_source = MusicalNoteSource::Game;
+                track.musical_note_model = Some(model);
+            }
+            Err(error) => {
+                eprintln!("GAME inference failed; keeping LegacyFcpeTracker notes: {error}");
+            }
+        }
+    }
+
     // 确保播放器可用并加载音频
     ensure_player(&app_state);
     if let Some(player) = app_state.player.lock().unwrap().as_ref() {
@@ -369,7 +480,17 @@ async fn analyze_audio(
         let mut lyrics_guard = app_state.lyrics.lock().unwrap();
         if lyrics_guard.iter().any(|l| l.token_timing_auto) {
             let align_params = crate::lyrics::TokenAlignParams::default();
-            crate::lyrics::align_token_times(&mut lyrics_guard, &t, &align_params);
+            let audio = app_state.audio_path.lock().unwrap().clone();
+            let fa_guard = app_state.forced_align.lock().unwrap();
+            crate::lyrics::align_token_times_with_backend(
+                &mut lyrics_guard,
+                &t,
+                &align_params,
+                audio.as_deref().map(Path::new),
+                fa_guard
+                    .as_ref()
+                    .map(|backend| backend as &dyn crate::forced_align::ForcedAlignBackend),
+            );
         }
     }
     rebind_lyrics(&app_state);
@@ -395,7 +516,17 @@ fn load_lyrics_lrc(
         match track_guard.as_ref() {
             Some(track) => {
                 let align_params = crate::lyrics::TokenAlignParams::default();
-                crate::lyrics::align_token_times(&mut lines, track, &align_params);
+                let audio = app_state.audio_path.lock().unwrap().clone();
+                let fa_guard = app_state.forced_align.lock().unwrap();
+                crate::lyrics::align_token_times_with_backend(
+                    &mut lines,
+                    track,
+                    &align_params,
+                    audio.as_deref().map(Path::new),
+                    fa_guard
+                        .as_ref()
+                        .map(|backend| backend as &dyn crate::forced_align::ForcedAlignBackend),
+                );
             }
             None => {
                 crate::lyrics::distribute_token_times(&mut lines);
@@ -639,7 +770,16 @@ fn export_debug_segment(
         }
     }
 
-    let note_events: Vec<_> = track
+    let musical_note_events: Vec<_> = track
+        .as_ref()
+        .map(|t| {
+            t.musical_notes
+                .iter()
+                .filter(|e| e.end >= w_start && e.start <= w_end)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let legacy_note_events: Vec<_> = track
         .as_ref()
         .map(|t| {
             t.note_events
@@ -662,18 +802,39 @@ fn export_debug_segment(
                 "reading_spans": l.reading_spans,
                 "moras": l.moras,
                 "tokens": l.tokens,
+                "alignment_sources": l.tokens.iter().map(|t| t.alignment_source).collect::<Vec<_>>(),
             })
         })
         .collect();
+    let alignment_backend = app_state
+        .forced_align
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|backend| backend.name())
+        .unwrap_or("MoraDP/WeightedFallback");
 
     let doc = serde_json::json!({
         "exported_at_window": { "start": w_start, "end": w_end, "around": around_secs },
         "versions": {
             "note_tracker": 2,
-            "alignment": "MoraDp/EnhancedLrc/WeightedFallback per token",
+            "continuous_pitch": "FCPE",
+            "musical_note_track": "canonical musical_notes with legacy note_events compatibility",
+            "alignment": "EnhancedLrc/ForcedAlign/MoraDp/WeightedFallback per token",
         },
+        "alignment_engine": alignment_backend,
+        "continuous_pitch": {
+            "engine": "FCPE",
+            "frames": pitch_frames.clone(),
+        },
+        "musical_note_engine": track.as_ref().map(|t| serde_json::json!({
+            "source": t.musical_note_source,
+            "model": t.musical_note_model,
+            "events": musical_note_events.clone(),
+        })),
         "pitch_frames": pitch_frames,
-        "musical_note_events": note_events,
+        "musical_note_events": musical_note_events,
+        "legacy_note_events": legacy_note_events,
         "lines": lines_json,
     });
 
@@ -687,6 +848,8 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
             analyzer: Mutex::new(None),
+            game_engine: Mutex::new(None),
+            forced_align: Mutex::new(None),
             track: Mutex::new(None),
             lyrics: Mutex::new(Vec::new()),
             player: Mutex::new(None),

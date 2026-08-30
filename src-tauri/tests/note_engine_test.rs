@@ -1,5 +1,7 @@
 use pitch_analyzer_tauri_lib::models::NoteTrackingParams;
-use pitch_analyzer_tauri_lib::note_engine::{LegacyFcpeNoteTracker, MusicalNoteEngine, MusicalNoteSource};
+use pitch_analyzer_tauri_lib::note_engine::{
+    LegacyFcpeNoteTracker, MusicalNoteEngine, MusicalNoteSource,
+};
 
 #[test]
 fn test_legacy_fcpe_note_tracker_engine() {
@@ -33,7 +35,11 @@ fn test_vibrato_transcription_stays_single_event() {
     let confidences = vec![0.95; 100];
 
     let events = tracker.transcribe_from_track(&times, &midis, &confidences);
-    assert_eq!(events.len(), 1, "Vibrato must transcribe to exactly 1 MusicalNoteEvent");
+    assert_eq!(
+        events.len(),
+        1,
+        "Vibrato must transcribe to exactly 1 MusicalNoteEvent"
+    );
     assert_eq!(events[0].note_name, "A4");
     assert_eq!(events[0].midi_rounded, 69);
 }

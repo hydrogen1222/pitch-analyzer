@@ -1,14 +1,16 @@
 // 歌词解析: LRC + TXT, tokenizer, 字级对齐, NoteEvent 绑定, primary note 选择
 
+use crate::forced_align::ForcedAlignBackend;
 use crate::japanese::reading::JapaneseReadingProvider;
 use crate::japanese::{mora, phoneme, KanaOnlyProvider};
-use crate::note_engine::NoteWindow;
 use crate::models::{
-    AlignmentSource, LyricLine, LyricToken, MoraUnit, NoteEvent, NoteTrackingParams, PitchNote,
-    PitchTrack, UnpitchedReason,
+    AlignmentSource, LyricLine, LyricToken, MoraUnit, NoteTrackingParams, PitchNote, PitchTrack,
+    UnpitchedReason,
 };
+use crate::note_engine::NoteWindow;
 use regex::Regex;
 use std::cmp::Ordering;
+use std::path::Path;
 
 // ── Tokenizer ──────────────────────────────────────────────
 
@@ -590,6 +592,20 @@ fn distribute_line_times(line: &mut LyricLine, start: f32, end: f32) {
 /// 特征: voiced/unvoiced、F0 变化、RMS 能量包络；字符数量作为最终约束；
 /// 通过 DP 代价函数选择 N-1 个最佳切分点。无音频特征时回退到均匀分配。
 pub fn align_token_times(lines: &mut [LyricLine], track: &PitchTrack, params: &TokenAlignParams) {
+    align_token_times_with_backend(lines, track, params, None, None);
+}
+
+/// 带真实声学 FA 后端的歌词对齐入口。
+///
+/// Enhanced LRC 在函数入口直接保留；其余行先尝试配置好的 FA，只有
+/// FA 不可用/失败/不返回完整 mora 时才进入现有 MoraDP，再退到加权分配。
+pub fn align_token_times_with_backend(
+    lines: &mut [LyricLine],
+    track: &PitchTrack,
+    params: &TokenAlignParams,
+    audio_path: Option<&Path>,
+    backend: Option<&dyn ForcedAlignBackend>,
+) {
     for line in lines.iter_mut() {
         let (start, end) = match (line.start_time, line.end_time) {
             (Some(s), Some(e)) if e > s => (s, e),
@@ -607,6 +623,20 @@ pub fn align_token_times(lines: &mut [LyricLine], track: &PitchTrack, params: &T
             && !line.token_timing_auto
         {
             continue;
+        }
+        if let (Some(backend), Some(audio_path)) = (backend, audio_path) {
+            match backend.align_line(line, track, audio_path, start, end) {
+                Ok(result) => {
+                    if apply_forced_alignment(line, result, start, end) {
+                        line.token_timing_auto = true;
+                        continue;
+                    }
+                    eprintln!("FA backend {} 返回了不完整或无效的 mora", backend.name());
+                }
+                Err(error) => {
+                    eprintln!("FA backend {} 失败，回退 MoraDP: {}", backend.name(), error);
+                }
+            }
         }
         if dp_align_line(line, track, start, end, params) {
             line.token_timing_auto = true;
@@ -636,6 +666,73 @@ pub fn align_token_times(lines: &mut [LyricLine], track: &PitchTrack, params: &T
             }
         }
     }
+}
+
+/// 将 FA 返回的 mora 时间回填到行和 display token。
+/// 返回 false 表示不能严格覆盖整行的已知 mora，调用方必须回退。
+fn apply_forced_alignment(
+    line: &mut LyricLine,
+    result: crate::forced_align::LineAlignmentResult,
+    line_start: f32,
+    line_end: f32,
+) -> bool {
+    if result.source != AlignmentSource::ForcedAlign
+        || result.moras.len() != line.moras.len()
+        || result.moras.is_empty()
+    {
+        return false;
+    }
+    let mut previous_end = line_start;
+    for (i, aligned) in result.moras.iter().enumerate() {
+        if aligned.mora_index != i
+            || aligned.mora != line.moras[i].kana
+            || aligned.end.partial_cmp(&aligned.start) != Some(Ordering::Greater)
+            || aligned.start < line_start - 0.02
+            || aligned.end > line_end + 0.02
+            || aligned.start + 0.001 < previous_end
+        {
+            return false;
+        }
+        previous_end = aligned.end;
+    }
+
+    for (mora, aligned) in line.moras.iter_mut().zip(result.moras) {
+        mora.start_time = Some(aligned.start.clamp(line_start, line_end));
+        mora.end_time = Some(aligned.end.clamp(line_start, line_end));
+        mora.confidence = aligned.confidence.clamp(0.0, 1.0);
+    }
+
+    // 回填 display token 时仍按 char span 聚合 mora；不会把 coarse
+    // ReadingSpan 拆成伪造的一对一字音映射。
+    for token in &mut line.tokens {
+        let mut first = None;
+        let mut last = None;
+        let mut confidence = 1.0f32;
+        for mora in &line.moras {
+            if token.char_start >= mora.char_end || mora.char_start >= token.char_end {
+                continue;
+            }
+            if let (Some(start), Some(end)) = (mora.start_time, mora.end_time) {
+                first = Some(first.map_or(start, |v: f32| v.min(start)));
+                last = Some(last.map_or(end, |v: f32| v.max(end)));
+                confidence = confidence.min(mora.confidence);
+            }
+        }
+        if let (Some(start), Some(end)) = (first, last) {
+            token.start_time = Some(start);
+            token.end_time = Some(end);
+            token.alignment_source = Some(AlignmentSource::ForcedAlign);
+            token.alignment_confidence = confidence;
+        } else {
+            // 非日语/无读音 token 不应被误报成 FA 成功；给它一个窗口时间，
+            // 音高绑定仍会根据真实重叠给出明确的 unpitched reason。
+            token.start_time = token.start_time.or(Some(line_start));
+            token.end_time = token.end_time.or(Some(line_end));
+            token.alignment_source = Some(AlignmentSource::ForcedAlign);
+            token.alignment_confidence = result.confidence.clamp(0.0, 1.0);
+        }
+    }
+    true
 }
 
 /// 一个声学对齐单元: 已知 mora (每个 mora 在整行序列中恰好出现一次)
@@ -699,7 +796,11 @@ fn build_align_units(line: &LyricLine) -> Vec<AlignUnit> {
         a.sort_char
             .partial_cmp(&b.sort_char)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.mora_idx.unwrap_or(usize::MAX).cmp(&b.mora_idx.unwrap_or(usize::MAX)))
+            .then(
+                a.mora_idx
+                    .unwrap_or(usize::MAX)
+                    .cmp(&b.mora_idx.unwrap_or(usize::MAX)),
+            )
     });
     units
 }
@@ -946,11 +1047,11 @@ fn dp_align_line(
             if mora.char_start < token.char_end && token.char_start < mora.char_end {
                 token_has_mora[ti] = true;
                 let f = &mut token_first[ti];
-                if f.map_or(true, |v| us < v) {
+                if f.is_none_or(|v| us < v) {
                     *f = Some(us);
                 }
                 let l = &mut token_last[ti];
-                if l.map_or(true, |v| ue > v) {
+                if l.is_none_or(|v| ue > v) {
                     *l = Some(ue);
                 }
             }
@@ -964,7 +1065,7 @@ fn dp_align_line(
             token_total_w[ti] += u.weight;
         }
     }
-    for (u, &(us, ue)) in units.iter().zip(&unit_times) {
+    for (u, _) in units.iter().zip(&unit_times) {
         if u.mora_idx.is_none() && u.token_idx < n_tokens && !token_has_mora[u.token_idx] {
             token_known_w[u.token_idx] += u.weight; // unknown 权重, 占位使 confidence=0
         }
@@ -977,7 +1078,8 @@ fn dp_align_line(
             }
         } else {
             // fallback unit: 从 unit_times 里找该 token 的先验 unit
-            units.iter()
+            units
+                .iter()
                 .zip(unit_times.iter())
                 .find(|(u, _)| u.mora_idx.is_none() && u.token_idx == ti)
                 .map(|(_, &(s, e))| (s, e))
@@ -1030,7 +1132,7 @@ pub fn bind_pitch_to_tokens(
         return;
     }
     let min_dur = note_tracking.min_note_duration_ms / 1000.0;
-    let has_events = !pitch_track.note_events.is_empty();
+    let has_events = !pitch_track.musical_notes.is_empty() || !pitch_track.note_events.is_empty();
 
     for line in lines.iter_mut() {
         if !has_events {
@@ -1058,14 +1160,34 @@ pub fn bind_pitch_to_tokens(
         let mora_timing = line.moras.iter().any(|m| m.start_time.is_some());
         if !pitch_track.musical_notes.is_empty() {
             if mora_timing {
-                bind_line_at_mora_level(line, &pitch_track.musical_notes, pitch_track, confidence_threshold);
+                bind_line_at_mora_level(
+                    line,
+                    &pitch_track.musical_notes,
+                    pitch_track,
+                    confidence_threshold,
+                );
             } else {
-                bind_line_at_token_level(line, &pitch_track.musical_notes, pitch_track, confidence_threshold);
+                bind_line_at_token_level(
+                    line,
+                    &pitch_track.musical_notes,
+                    pitch_track,
+                    confidence_threshold,
+                );
             }
         } else if mora_timing {
-            bind_line_at_mora_level(line, &pitch_track.note_events, pitch_track, confidence_threshold);
+            bind_line_at_mora_level(
+                line,
+                &pitch_track.note_events,
+                pitch_track,
+                confidence_threshold,
+            );
         } else {
-            bind_line_at_token_level(line, &pitch_track.note_events, pitch_track, confidence_threshold);
+            bind_line_at_token_level(
+                line,
+                &pitch_track.note_events,
+                pitch_track,
+                confidence_threshold,
+            );
         }
     }
 }
@@ -1105,6 +1227,24 @@ fn admit_events_for_window<T: NoteWindow>(
         let score = 0.55 * r_tok + 0.30 * r_note + 0.15 * ev.confidence();
         out.push((i, ov, r_tok, r_note, score));
     }
+    // Canonical GAME events are chronological, but imported/legacy tracks can
+    // arrive in arbitrary order. Keep every admitted event (many-to-many),
+    // while making the matcher order monotonic for detailed display and debug.
+    out.sort_by(|a, b| {
+        events[a.0]
+            .window()
+            .0
+            .partial_cmp(&events[b.0].window().0)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                events[a.0]
+                    .window()
+                    .1
+                    .partial_cmp(&events[b.0].window().1)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then(a.0.cmp(&b.0))
+    });
     out
 }
 
@@ -1169,9 +1309,7 @@ fn bind_line_at_mora_level<T: NoteWindow>(
         // 同一事件在两层都有时取 max (避免重复计入重叠)。
         let t_start0 = token.start_time.unwrap();
         let t_end0 = token.end_time.unwrap();
-        for (idx, ov, _, _, _) in
-            admit_events_for_window(events, t_start0, t_end0)
-        {
+        for (idx, ov, _, _, _) in admit_events_for_window(events, t_start0, t_end0) {
             let e = event_best.entry(idx).or_insert(0.0);
             if *e < ov {
                 *e = ov;
@@ -1204,7 +1342,12 @@ fn bind_line_at_mora_level<T: NoteWindow>(
         // 详细模式的 → 箭头必须按时间顺序 (HashMap 迭代无序, 任务书 §9);
         // primary 按覆盖x置信x稳定评分独立重选, 不依赖排序前下标
         let mut order: Vec<usize> = (0..notes.len()).collect();
-        order.sort_by(|&a, &b| notes[a].start_time.partial_cmp(&notes[b].start_time).unwrap_or(Ordering::Equal));
+        order.sort_by(|&a, &b| {
+            notes[a]
+                .start_time
+                .partial_cmp(&notes[b].start_time)
+                .unwrap_or(Ordering::Equal)
+        });
         let sorted_notes: Vec<PitchNote> = order.iter().map(|&i| notes[i].clone()).collect();
         let sorted_scores: Vec<f32> = order.iter().map(|&i| scores[i]).collect();
         token.pitch_notes = sorted_notes;
@@ -1255,7 +1398,12 @@ fn bind_line_at_token_level<T: NoteWindow>(
             scores.push(primary_score(ev, *ov));
         }
         let mut order: Vec<usize> = (0..notes.len()).collect();
-        order.sort_by(|&a, &b| notes[a].start_time.partial_cmp(&notes[b].start_time).unwrap_or(Ordering::Equal));
+        order.sort_by(|&a, &b| {
+            notes[a]
+                .start_time
+                .partial_cmp(&notes[b].start_time)
+                .unwrap_or(Ordering::Equal)
+        });
         let sorted_notes: Vec<PitchNote> = order.iter().map(|&i| notes[i].clone()).collect();
         let sorted_scores: Vec<f32> = order.iter().map(|&i| scores[i]).collect();
         token.pitch_notes = sorted_notes;
@@ -1311,19 +1459,6 @@ fn note_window_to_pitch_note<T: NoteWindow>(ev: &T, start: f32, end: f32) -> Pit
         mean_midi: f,
         rounded_midi: ev.midi_rounded(),
         confidence_mean: ev.confidence(),
-        point_count: (dur / 0.01).round().max(1.0) as usize,
-    }
-}
-
-fn note_event_to_pitch_note(ev: &NoteEvent, start: f32, end: f32) -> PitchNote {
-    let dur = (end - start).max(0.0);
-    PitchNote {
-        start_time: start,
-        end_time: end,
-        median_midi: ev.midi as f32,
-        mean_midi: ev.midi as f32,
-        rounded_midi: ev.midi,
-        confidence_mean: ev.confidence,
         point_count: (dur / 0.01).round().max(1.0) as usize,
     }
 }

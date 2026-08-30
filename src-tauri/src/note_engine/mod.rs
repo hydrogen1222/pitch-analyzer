@@ -14,17 +14,12 @@ pub use game::GameNoteEngine;
 pub use legacy_fcpe::LegacyFcpeNoteTracker;
 
 /// 音乐音符数据来源
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MusicalNoteSource {
     Game,
+    #[default]
     LegacyFcpeTracker,
     ImportedMidi,
-}
-
-impl Default for MusicalNoteSource {
-    fn default() -> Self {
-        MusicalNoteSource::LegacyFcpeTracker
-    }
 }
 
 /// Binder / matcher 的统一音符窗口抽象: canonical MusicalNoteEvent 与

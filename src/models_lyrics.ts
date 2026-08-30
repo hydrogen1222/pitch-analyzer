@@ -70,6 +70,7 @@ export interface LyricLine {
   tokens: LyricToken[];
   primary_text?: string;
   translations?: string[];
+  token_timing_auto?: boolean;
   reading_spans?: ReadingSpan[];
   moras?: MoraUnit[];
 }

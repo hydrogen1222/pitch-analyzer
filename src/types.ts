@@ -5,7 +5,25 @@ export interface PitchTrack {
   confidences: number[];
   midis: number[];
   rms?: number[];
+  flux?: number[];
   note_events?: NoteEvent[];
+  /** Canonical musical-note track; note_events is retained for compatibility. */
+  musical_notes?: MusicalNoteEvent[];
+  musical_note_source?: "Game" | "LegacyFcpeTracker" | "ImportedMidi";
+  musical_note_model?: string | null;
+}
+
+export interface MusicalNoteEvent {
+  id: number;
+  start: number;
+  end: number;
+  midi_float: number;
+  midi_rounded: number;
+  note_name: string;
+  confidence: number;
+  source: "Game" | "LegacyFcpeTracker" | "ImportedMidi";
+  boundary_confidence?: number | null;
+  is_slur?: boolean | null;
 }
 
 export interface NoteEvent {

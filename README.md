@@ -8,7 +8,7 @@
 
 **基于 AI 深度学习的人声音高分析、钢琴卷帘可视化与卡拉OK歌词自动对齐工具。**
 
-[FCPE](https://github.com/CNChTu/FCPE) Pitch Engine · Tauri 2 + Rust · Cross-Platform Desktop App
+[FCPE](https://github.com/CNChTu/FCPE) continuous F0 · [OpenVPI GAME](https://github.com/openvpi/GAME) canonical notes · Tauri 2 + Rust
 
 [English](#english) · [中文](#中文)
 
@@ -68,8 +68,9 @@ If you are a **singer**, **content creator**, or **vocal tuner**, this is your g
 ## ✨ Key Features
 
 - 🔬 **Highly Accurate AI Pitch Tracking** — Powered by the FCPE model via ONNX Runtime. Perfect even on quiet/noisy acapella tracks.
+- 🎼 **Canonical Musical Notes** — With the complete GAME ONNX bundle, note events come from the real GAME inference pipeline. Missing models or inference errors are explicitly labeled `LegacyFcpeTracker`.
 - 🎹 **Visual Piano Roll** — A scrolling view showing your pitch curve aligned over piano keys with a real-time playback cursor.
-- 🎤 **Karaoke Lyrics Sync** — Import LRC (with/without translations) or plain text TXT. The app automatically splits CJK/English characters and highlights them in sync.
+- 🎤 **Karaoke Lyrics Sync** — Import LRC (with/without translations) or plain text TXT. Alignment priority is Enhanced LRC, optional real MMS-FA, mora-aware acoustic DP, then weighted fallback.
 - 📋 **One-Click Subtitle Export (SRT)** — Generates subtitle tracks with note annotations (e.g. `Hello [C4]`) for video editing.
 - 💾 **Project Save/Load** — Save your workspace into a single JSON project file and reopen it anytime.
 
@@ -97,6 +98,7 @@ Because AI models are too large to host on source code, you need to place them m
 2. Put these two files inside the `models` folder:
    - `fcpe.onnx` (the main AI model file, ~43 MB)
    - `fcpe_config.json` (the model configuration parameters, ~8 KB)
+3. For canonical note extraction, also place `GAME-1.0.3-small-onnx/` there with `config.json`, `encoder.onnx`, `segmenter.onnx`, `bd2dur.onnx`, `dur2bd.onnx`, and `estimator.onnx`. The app visibly falls back to `LegacyFcpeTracker` when this complete set is unavailable.
 
 ### Step 3: Setup ONNX Runtime
 The app uses ONNX Runtime to accelerate calculations.
@@ -109,6 +111,10 @@ The app uses ONNX Runtime to accelerate calculations.
   ```bash
   export ORT_DYLIB_PATH=/path/to/libonnxruntime.so
   ```
+
+#### Optional real acoustic forced alignment
+
+MMS-FA is opt-in because it requires a Python environment with `torch` and `torchaudio` and downloads pretrained acoustic weights on first use. Set `PITCH_ANALYZER_FA_ENABLE=1`; when needed also set `PITCH_ANALYZER_FA_PYTHON` and `PITCH_ANALYZER_FA_HELPER`. Without it, the app uses the explicit MoraDP fallback and preserves the source in debug/export data.
 
 <p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 
@@ -172,7 +178,10 @@ pnpm install
 pnpm tauri dev
 
 # 3. Run Rust backend tests
-cargo test --manifest-path src-tauri/Cargo.lock
+cargo test --manifest-path src-tauri/Cargo.toml
+
+# Optional model-backed acceptance (requires the complete GAME bundle)
+$env:ROUND3_ACCEPTANCE="1"; cargo test --manifest-path src-tauri/Cargo.toml --test round3_acceptance -- --ignored
 
 # 4. Build release package
 pnpm tauri build
@@ -226,6 +235,7 @@ pnpm tauri build
 2. 将以下两个模型文件放入 `models` 中：
    - `fcpe.onnx`（音高检测模型，约 43 MB）
    - `fcpe_config.json`（模型配置文件，约 8 KB）
+3. 如果要启用 canonical 音符轨道，还需放入完整的 `GAME-1.0.3-small-onnx/` 目录：`config.json`、`encoder.onnx`、`segmenter.onnx`、`bd2dur.onnx`、`dur2bd.onnx`、`estimator.onnx` 缺一不可。缺失或推理失败时，程序会明确标记并回退到 `LegacyFcpeTracker`，不会伪造 GAME 音符。
 
 ### 第三步：配置 ONNX 运行环境
 应用依赖 ONNX Runtime 来运行模型。
@@ -238,6 +248,10 @@ pnpm tauri build
   ```bash
   export ORT_DYLIB_PATH=/你的路径/libonnxruntime.so
   ```
+
+#### 可选的真实声学强制对齐
+
+MMS-FA 是可选后端，需要安装含 `torch` 和 `torchaudio` 的 Python 环境，首次使用会下载声学模型。设置 `PITCH_ANALYZER_FA_ENABLE=1`，必要时再设置 `PITCH_ANALYZER_FA_PYTHON` / `PITCH_ANALYZER_FA_HELPER`。未配置时使用明确的 MoraDP 回退，对齐来源会保存在调试/导出数据中。
 
 <p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 
@@ -301,7 +315,10 @@ pnpm install
 pnpm tauri dev
 
 # 3. 运行 Rust 后端自动化测试
-cargo test --manifest-path src-tauri/Cargo.lock
+cargo test --manifest-path src-tauri/Cargo.toml
+
+# 可选：运行真实模型验收（需要完整 GAME 模型）
+$env:ROUND3_ACCEPTANCE="1"; cargo test --manifest-path src-tauri/Cargo.toml --test round3_acceptance -- --ignored
 
 # 4. 打包发布应用
 pnpm tauri build

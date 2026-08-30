@@ -510,6 +510,7 @@ async function initApp() {
     const cs = token.char_start ?? 0;
     const ce = token.char_end ?? 0;
     const moras = (line.moras ?? []).filter((m) => cs < m.char_end && m.char_start < ce);
+    const canonicalNotes = state.track?.musical_notes ?? [];
     if (moras.length > 0) {
       lines.push(`Moras: ${moras.map((m) => m.kana).join(" / ")}`);
       lines.push(`Phonemes: ${moras.flatMap((m) => m.phonemes).join(" ")}`);
@@ -519,8 +520,9 @@ async function initApp() {
       }
       for (const m of moras) {
         for (const b of m.note_bindings ?? []) {
-          const ev = state.track?.note_events?.[b.note_event_index];
-          const nm = ev ? noteNameOf(ev.midi) : "?";
+          const canonical = canonicalNotes.length > 0 ? canonicalNotes[b.note_event_index] : undefined;
+          const legacy = state.track?.note_events?.[b.note_event_index];
+          const nm = canonical ? noteNameOf(canonical.midi_float) : legacy ? noteNameOf(legacy.midi) : "?";
           lines.push(`  binding ${nm}: overlap=${b.overlap_ms.toFixed(0)}ms r_tok=${b.overlap_ratio_token.toFixed(2)} r_note=${b.overlap_ratio_note.toFixed(2)} score=${b.score.toFixed(2)}`);
         }
       }
@@ -536,6 +538,7 @@ async function initApp() {
       lines.push(`Notes: (无正式绑定)`);
     }
     lines.push(`Unpitched reason: ${token.unpitched_reason ?? "-"}`);
+    lines.push(`Note engine: ${state.track?.musical_note_source ?? "LegacyFcpeTracker"} / ${state.track?.musical_note_model ?? "legacy-notetracker"}`);
     lines.push(`Tracker: v${state.track?.note_events?.[0]?.tracker_version ?? "?"}`);
     debugContent.textContent = lines.join("\n");
     debugPanel.style.display = "block";

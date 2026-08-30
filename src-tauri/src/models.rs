@@ -282,7 +282,7 @@ impl Default for PitchTrack {
 pub enum AlignmentSource {
     /// enhanced LRC 自带的逐字时间锚点
     EnhancedLrc,
-    /// 音素级 forced alignment (P3, 尚未实现)
+    /// 真实声学模型 forced alignment (MMS-FA 等)
     ForcedAlign,
     /// 莫拉感知声学 DP (复用 mel 特征)
     MoraDp,

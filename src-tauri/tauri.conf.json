@@ -28,7 +28,8 @@
     "targets": ["nsis", "deb", "rpm"],
     "resources": [
       "resources/*",
-      "../models/*"
+      "../models/**/*",
+      "../scripts/forced_align_mms.py"
     ],
     "icon": [
       "icons/32x32.png",

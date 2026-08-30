@@ -1,5 +1,7 @@
 use pitch_analyzer_tauri_lib::japanese::mora::parse_kana_moras;
-use pitch_analyzer_tauri_lib::japanese::reading::{apply_reading_overrides, JapaneseReadingProvider, ReadingOverride};
+use pitch_analyzer_tauri_lib::japanese::reading::{
+    apply_reading_overrides, JapaneseReadingProvider, ReadingOverride,
+};
 use pitch_analyzer_tauri_lib::japanese::unidic::LinderaUnidicProvider;
 
 fn get_reading_and_moras(text: &str) -> (String, Vec<String>) {
@@ -31,19 +33,35 @@ fn test_unidic_readings_regression() {
 
     // 2. 二人 → ふたり (3 moras)
     let (_, moras) = get_reading_and_moras("二人");
-    assert_eq!(moras, vec!["ふ", "た", "り"], "二人 should be 3 moras [ふ, た, り]");
+    assert_eq!(
+        moras,
+        vec!["ふ", "た", "り"],
+        "二人 should be 3 moras [ふ, た, り]"
+    );
 
     // 3. 心 → こころ (3 moras)
     let (_, moras) = get_reading_and_moras("心");
-    assert_eq!(moras, vec!["こ", "こ", "ろ"], "心 should be 3 moras [こ, こ, ろ]");
+    assert_eq!(
+        moras,
+        vec!["こ", "こ", "ろ"],
+        "心 should be 3 moras [こ, こ, ろ]"
+    );
 
     // 4. 嵐 → あらし (3 moras)
     let (_, moras) = get_reading_and_moras("嵐");
-    assert_eq!(moras, vec!["あ", "ら", "し"], "嵐 should be 3 moras [あ, ら, し]");
+    assert_eq!(
+        moras,
+        vec!["あ", "ら", "し"],
+        "嵐 should be 3 moras [あ, ら, し]"
+    );
 
     // 5. 流れる → ながれる (4 moras)
     let (_, moras) = get_reading_and_moras("流れる");
-    assert_eq!(moras, vec!["な", "が", "れ", "る"], "流れる should be 4 moras [な, が, れ, る]");
+    assert_eq!(
+        moras,
+        vec!["な", "が", "れ", "る"],
+        "流れる should be 4 moras [な, が, れ, る]"
+    );
 
     // 6. 群れ → むれ (2 moras)
     let (_, moras) = get_reading_and_moras("群れ");
@@ -51,7 +69,11 @@ fn test_unidic_readings_regression() {
 
     // 7. スーパー → す・ー・ぱ・ー (4 moras)
     let (_, moras) = get_reading_and_moras("スーパー");
-    assert_eq!(moras, vec!["す", "ー", "ぱ", "ー"], "スーパー should be 4 moras");
+    assert_eq!(
+        moras,
+        vec!["す", "ー", "ぱ", "ー"],
+        "スーパー should be 4 moras"
+    );
 
     // 8. きょう → 2 moras (きょ・ー / きょ・う)
     let (_, moras) = get_reading_and_moras("きょう");
@@ -70,7 +92,7 @@ fn test_unidic_readings_regression() {
 fn test_user_reading_override() {
     let provider = LinderaUnidicProvider;
     let mut spans = provider.analyze("運命の扉").expect("analyze failed");
-    
+
     // Default UniDic reading for 運命 is うんめい (4 moras)
     let initial_moras: Vec<String> = spans
         .iter()

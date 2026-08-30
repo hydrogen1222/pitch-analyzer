@@ -3,9 +3,7 @@
 // 用 symphonia 解码任意主流格式 (wav/flac/mp3/ogg/aac)，
 // 再用 rubato 做高质量重采样到 16 kHz。
 
-use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-};
+use rubato::Resampler;
 use std::fs::File;
 use std::path::Path;
 use symphonia::core::audio::{AudioBufferRef, Signal};
@@ -50,8 +48,11 @@ pub fn compute_rms_envelope(samples: &[f32], n_frames: usize) -> Vec<f32> {
     rms
 }
 
-/// 解码任意音频文件，混音到单声道并重采样到 16 kHz。
-pub fn load_audio_16k_mono(path: &Path) -> Result<DecodedAudio, String> {
+/// 解码任意音频文件，混音到单声道并重采样到目标采样率。
+pub fn load_audio_mono(path: &Path, target_sr: u32) -> Result<DecodedAudio, String> {
+    if target_sr == 0 {
+        return Err("目标采样率必须大于 0".to_string());
+    }
     let file = File::open(path).map_err(|e| format!("打开音频失败: {}", e))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -115,16 +116,21 @@ pub fn load_audio_16k_mono(path: &Path) -> Result<DecodedAudio, String> {
         }
     }
 
-    let samples = if src_sr == TARGET_SR {
+    let samples = if src_sr == target_sr {
         mono_samples
     } else {
-        resample_to_16k(&mono_samples, src_sr)?
+        resample_to(&mono_samples, src_sr, target_sr)?
     };
 
     Ok(DecodedAudio {
         samples,
-        sample_rate: TARGET_SR,
+        sample_rate: target_sr,
     })
+}
+
+/// 解码任意音频文件，混音到单声道并重采样到 16 kHz (FCPE 输入)。
+pub fn load_audio_16k_mono(path: &Path) -> Result<DecodedAudio, String> {
+    load_audio_mono(path, TARGET_SR)
 }
 
 /// 把一帧解码后的多声道音频缓冲混音成单声道附加到 mono_samples。
@@ -162,18 +168,21 @@ fn append_mono(buf: &AudioBufferRef<'_>, channels: usize, out: &mut Vec<f32>) {
     }
 }
 
-/// 用 rubato 的高质量 sinc 重采样到 16 kHz。
-fn resample_to_16k(samples: &[f32], src_sr: u32) -> Result<Vec<f32>, String> {
-    let ratio = TARGET_SR as f64 / src_sr as f64;
-    let params = SincInterpolationParameters {
+/// 用 rubato 的高质量 sinc 重采样到任意目标采样率。
+/// 任意目标采样率的重采样 (GAME 模型需要 44100Hz 等)
+pub fn resample_to(samples: &[f32], src_sr: u32, dst_sr: u32) -> Result<Vec<f32>, String> {
+    if src_sr == dst_sr || samples.is_empty() {
+        return Ok(samples.to_vec());
+    }
+    let ratio = dst_sr as f64 / src_sr as f64;
+    let params = rubato::SincInterpolationParameters {
         sinc_len: 256,
         f_cutoff: 0.95,
-        interpolation: SincInterpolationType::Linear,
+        interpolation: rubato::SincInterpolationType::Linear,
         oversampling_factor: 128,
-        window: WindowFunction::BlackmanHarris2,
+        window: rubato::WindowFunction::BlackmanHarris2,
     };
-    // 单 chunk 一次性处理（FCPE 通常处理几十秒的片段，一次性 OK）
-    let mut resampler = SincFixedIn::<f32>::new(ratio, 2.0, params, samples.len(), 1)
+    let mut resampler = rubato::SincFixedIn::<f32>::new(ratio, 2.0, params, samples.len(), 1)
         .map_err(|e| format!("创建重采样器失败: {}", e))?;
     let input = vec![samples.to_vec()];
     let mut out = resampler
