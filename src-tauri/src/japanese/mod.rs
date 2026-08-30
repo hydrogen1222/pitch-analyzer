@@ -6,7 +6,7 @@
 //   - 多个 mora 可以共享一个持续 NoteEvent
 //
 // provider 优先级 (任务书 §2.4):
-//   用户 override > ruby/furigana (未支持) > UniDic 词典 > kana-only > heuristic
+//   用户 override > ruby/furigana > UniDic 词典 > kana-only > heuristic
 
 pub mod mora;
 pub mod phoneme;
@@ -14,5 +14,8 @@ pub mod reading;
 pub mod unidic;
 
 pub use mora::parse_kana_moras;
-pub use reading::{JapaneseReadingProvider, KanaOnlyProvider};
+pub use reading::{
+    parse_ruby_text, ruby_display_offset, JapaneseReadingProvider, KanaOnlyProvider,
+    ParsedRubyText, RubyAnnotation, RubyParseError,
+};
 pub use unidic::LinderaUnidicProvider;

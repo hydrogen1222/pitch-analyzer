@@ -1,11 +1,14 @@
 // 歌词解析: LRC + TXT, tokenizer, 字级对齐, NoteEvent 绑定, primary note 选择
 
 use crate::forced_align::ForcedAlignBackend;
-use crate::japanese::reading::JapaneseReadingProvider;
+use crate::japanese::reading::{
+    apply_reading_overrides, parse_ruby_text, ruby_display_offset, JapaneseReadingProvider,
+    ReadingOverride,
+};
 use crate::japanese::{mora, phoneme, KanaOnlyProvider};
 use crate::models::{
     AlignmentSource, LyricLine, LyricToken, MoraUnit, NoteTrackingParams, PitchNote, PitchTrack,
-    UnpitchedReason,
+    ReadingDisplayGroup, UnpitchedReason,
 };
 use crate::note_engine::NoteWindow;
 use regex::Regex;
@@ -109,10 +112,10 @@ pub fn tokenize(text: &str) -> Vec<String> {
 }
 
 /// 填充行的日语三层文本结构: reading_spans → moras → token↔span 关联。
-/// 优先级: UniDic (Lindera) > KanaOnly (纯假名快速兜底)
+/// 优先级: UserRuby > UniDic (Lindera) > KanaOnly (纯假名快速兜底)
 fn build_japanese_layers(line: &mut LyricLine) {
     let unidic = crate::japanese::LinderaUnidicProvider;
-    let spans = if let Ok(s) = unidic.analyze(&line.primary_text) {
+    let mut spans = if let Ok(s) = unidic.analyze(&line.primary_text) {
         s
     } else {
         let kana_only = KanaOnlyProvider;
@@ -122,6 +125,21 @@ fn build_japanese_layers(line: &mut LyricLine) {
             return;
         }
     };
+
+    // Explicit Ruby is the highest-priority reading truth. Applying it before
+    // mora expansion also collapses a multi-glyph word into one span.
+    if !line.ruby_annotations.is_empty() {
+        let overrides: Vec<ReadingOverride> = line
+            .ruby_annotations
+            .iter()
+            .map(|annotation| ReadingOverride {
+                char_start: annotation.display_start,
+                char_end: annotation.display_end,
+                reading: annotation.reading.clone(),
+            })
+            .collect();
+        apply_reading_overrides(&mut spans, &overrides, &line.primary_text);
+    }
 
     // moras: 必须从读音 (pronunciation 优先, 其次 reading) 展开, 而非 surface
     // (任务书 5.2: surface="愛" reading="あい" 时拿 surface 拆 mora 永远得 0)
@@ -158,6 +176,7 @@ fn build_japanese_layers(line: &mut LyricLine) {
                 reading_offset_end: pm.char_end,
                 display_start: span.display_start,
                 display_end: span.display_end,
+                display_group_id: si,
                 start_time: None,
                 end_time: None,
                 confidence: span.confidence,
@@ -166,7 +185,27 @@ fn build_japanese_layers(line: &mut LyricLine) {
         }
     }
 
-    // token ↔ reading_span 关联 (char 区间求交)
+    let reading_display_groups: Vec<ReadingDisplayGroup> = spans
+        .iter()
+        .enumerate()
+        .map(|(id, span)| ReadingDisplayGroup {
+            id,
+            char_start: span.display_start,
+            char_end: span.display_end,
+            reading_span_id: id,
+            mora_start: span.mora_start,
+            mora_end: span.mora_end,
+            surface: span.surface.clone(),
+            reading: span.reading.clone(),
+            start_time: None,
+            end_time: None,
+            pitch_notes: Vec::new(),
+            primary_note: None,
+            unpitched_reason: None,
+        })
+        .collect();
+
+    // token ↔ reading_span/display_group 关联 (canonical display char offset)
     let mut tokens = std::mem::take(&mut line.tokens);
     for token in tokens.iter_mut() {
         for (si, span) in spans.iter().enumerate() {
@@ -174,9 +213,15 @@ fn build_japanese_layers(line: &mut LyricLine) {
                 token.reading_span_ids.push(si);
             }
         }
+        for group in &reading_display_groups {
+            if token.char_start < group.char_end && group.char_start < token.char_end {
+                token.reading_group_ids.push(group.id);
+            }
+        }
     }
     line.tokens = tokens;
     line.reading_spans = spans;
+    line.reading_display_groups = reading_display_groups;
     line.moras = moras;
 }
 
@@ -269,14 +314,21 @@ pub fn parse_txt(text: &str) -> Vec<LyricLine> {
         if trimmed.is_empty() {
             continue;
         }
+        let parsed =
+            parse_ruby_text(trimmed).unwrap_or_else(|_| crate::japanese::reading::ParsedRubyText {
+                raw_text: trimmed.to_string(),
+                display_text: trimmed.to_string(),
+                annotations: Vec::new(),
+            });
         let mut line = LyricLine::new(
-            trimmed.to_string(),
-            trimmed.to_string(),
+            parsed.display_text.clone(),
+            parsed.display_text.clone(),
             Vec::new(),
             None,
             None,
         );
-        line.tokens = tokenize_core(trimmed)
+        line.ruby_annotations = parsed.annotations;
+        line.tokens = tokenize_core(&line.primary_text)
             .into_iter()
             .map(|t| LyricToken::new(t.text, t.char_start, t.char_end))
             .collect();
@@ -315,6 +367,7 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
         /// enhanced LRC 逐字锚点: (原文 char 位置, 时间) — 权威逐字时间,
         /// 绑定到原文 span 而非某次分词的 token 下标
         anchors: Vec<(usize, f32)>,
+        ruby_annotations: Vec<crate::japanese::reading::RubyAnnotation>,
     }
 
     let mut entries: Vec<RawEntry> = Vec::new();
@@ -351,11 +404,15 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
             (tags.iter().map(|(t, _, _)| *t).collect(), None)
         };
 
-        // enhanced LRC 逐字锚点: <00:12.00>如<00:12.50>果
-        // 锚点位置 = 标签结束处 (其后紧跟该时间对应的文字), 绑定原文 span
-        let mut anchors: Vec<(usize, f32)> = Vec::new();
+        // Remove enhanced-LRC timing tags first. Anchor positions are measured
+        // in this intermediate annotated text, then mapped through Ruby into
+        // the canonical display-text coordinate system.
+        let mut annotated = String::new();
+        let mut raw_anchors: Vec<(usize, f32)> = Vec::new();
+        let mut cursor = 0usize;
         for cap in word_re.captures_iter(&raw_content) {
             let m = cap.get(0).unwrap();
+            annotated.push_str(&raw_content[cursor..m.start()]);
             let secs: f32 = {
                 let mins: f32 = cap[1].parse().unwrap_or(0.0);
                 let sec: f32 = cap[2].parse().unwrap_or(0.0);
@@ -366,11 +423,27 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
                 });
                 mins * 60.0 + sec + frac.unwrap_or(0.0)
             };
-            let char_pos = raw_content[..m.end()].chars().count();
-            anchors.push((char_pos, secs));
+            raw_anchors.push((annotated.chars().count(), secs));
+            cursor = m.end();
         }
-
-        let text_clean = word_re.replace_all(&raw_content, "").trim().to_string();
+        annotated.push_str(&raw_content[cursor..]);
+        let leading_ws = annotated.chars().take_while(|c| c.is_whitespace()).count();
+        let annotated_trimmed = annotated.trim();
+        let parsed = parse_ruby_text(annotated_trimmed).unwrap_or_else(|_| {
+            crate::japanese::reading::ParsedRubyText {
+                raw_text: annotated_trimmed.to_string(),
+                display_text: annotated_trimmed.to_string(),
+                annotations: Vec::new(),
+            }
+        });
+        let anchors: Vec<(usize, f32)> = raw_anchors
+            .iter()
+            .map(|(position, time)| {
+                let adjusted = position.saturating_sub(leading_ws);
+                (ruby_display_offset(&parsed, adjusted), *time)
+            })
+            .collect();
+        let text_clean = parsed.display_text.clone();
         if text_clean.is_empty() {
             continue;
         }
@@ -381,6 +454,7 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
                 end_time: explicit_end,
                 text: text_clean.clone(),
                 anchors: anchors.clone(),
+                ruby_annotations: parsed.annotations.clone(),
             });
         }
     }
@@ -393,6 +467,7 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
         text: String,
         translations: Vec<String>,
         anchors: Vec<(usize, f32)>,
+        ruby_annotations: Vec<crate::japanese::reading::RubyAnnotation>,
     }
     let mut merged: Vec<MergedEntry> = Vec::new();
     for entry in entries {
@@ -415,6 +490,7 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
             text: entry.text,
             translations: Vec::new(),
             anchors: entry.anchors,
+            ruby_annotations: entry.ruby_annotations,
         });
     }
 
@@ -443,6 +519,7 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
             Some(start_time),
             Some(end_time),
         );
+        line.ruby_annotations = entry.ruby_annotations.clone();
         line.text = if entry.translations.is_empty() {
             primary_text.clone()
         } else {
@@ -473,57 +550,93 @@ fn apply_enhanced_anchor_timings(line: &mut LyricLine, anchors: &[(usize, f32)],
     }
     let first_pos = anchors[0].0;
     let line_start = line.start_time.unwrap_or(0.0);
-    // 组 0 = 首锚点之前的前导字符, 组 i+1 = 锚点 i
-    let mut groups: Vec<usize> = Vec::with_capacity(line.tokens.len());
-    for tok in &line.tokens {
-        if tok.char_start < first_pos {
-            groups.push(0);
+    // Each timing tag is the start of the following display group. In
+    // particular, an anchor at position 0 must start the first group; it is
+    // not an empty "group before the first anchor".
+    for group_index in 0..line.reading_display_groups.len() {
+        let group_start = line.reading_display_groups[group_index].char_start;
+        let (g_start, g_end) = if group_start < first_pos {
+            (line_start, anchors[0].1)
         } else {
-            let mut g = 1;
-            for (i, (pos, _)) in anchors.iter().enumerate() {
-                if *pos <= tok.char_start {
-                    g = i + 1;
+            let anchor_index = anchors
+                .iter()
+                .enumerate()
+                .rposition(|(position, _)| position <= group_start)
+                .unwrap_or(0);
+            let start = anchors[anchor_index].1;
+            let end = anchors
+                .get(anchor_index + 1)
+                .map(|(_, time)| *time)
+                .unwrap_or(line_end);
+            (start, end)
+        };
+        if g_end > g_start {
+            line.reading_display_groups[group_index].start_time = Some(g_start);
+            line.reading_display_groups[group_index].end_time = Some(g_end);
+        }
+    }
+    project_group_times_to_tokens(line, AlignmentSource::EnhancedLrc, 1.0);
+}
+
+/// Project group timing to display glyphs after acoustic/explicit timing has
+/// been established. Multiple glyphs may intentionally share one group span.
+fn project_group_times_to_tokens(line: &mut LyricLine, source: AlignmentSource, confidence: f32) {
+    for token in &mut line.tokens {
+        let mut start = None;
+        let mut end = None;
+        for &group_id in &token.reading_group_ids {
+            let Some(group) = line.reading_display_groups.get(group_id) else {
+                continue;
+            };
+            if let (Some(group_start), Some(group_end)) = (group.start_time, group.end_time) {
+                start = Some(start.map_or(group_start, |value: f32| value.min(group_start)));
+                end = Some(end.map_or(group_end, |value: f32| value.max(group_end)));
+            }
+        }
+        if let (Some(start), Some(end)) = (start, end) {
+            token.start_time = Some(start);
+            token.end_time = Some(end);
+            token.alignment_source = Some(source);
+            token.alignment_confidence = confidence;
+        }
+    }
+}
+
+/// Rebuild display-group timing from uniquely aligned moras, then project it
+/// to glyph tokens. This is the critical coarse-span duplication boundary.
+fn project_mora_times_to_groups_and_tokens(
+    line: &mut LyricLine,
+    source: AlignmentSource,
+    default_confidence: f32,
+) {
+    let group_times: Vec<Option<(f32, f32, f32)>> = line
+        .reading_display_groups
+        .iter()
+        .map(|group| {
+            let mut first = None;
+            let mut last = None;
+            let mut confidence = 1.0f32;
+            for mora in line
+                .moras
+                .iter()
+                .filter(|mora| mora.reading_span_id == group.reading_span_id)
+            {
+                if let (Some(start), Some(end)) = (mora.start_time, mora.end_time) {
+                    first = Some(first.map_or(start, |value: f32| value.min(start)));
+                    last = Some(last.map_or(end, |value: f32| value.max(end)));
+                    confidence = confidence.min(mora.confidence);
                 }
             }
-            groups.push(g);
+            first.zip(last).map(|(start, end)| (start, end, confidence))
+        })
+        .collect();
+    for (group, timing) in line.reading_display_groups.iter_mut().zip(group_times) {
+        if let Some((start, end, _)) = timing {
+            group.start_time = Some(start);
+            group.end_time = Some(end);
         }
     }
-    // 组 i (>=1) 的时间区间 = [t_{i-1}, t_i 或 line_end); 组 0 = [line_start, t_0)
-    let mut starts: Vec<f32> = Vec::with_capacity(anchors.len() + 1);
-    starts.push(line_start);
-    for (_, t) in anchors {
-        starts.push(*t);
-    }
-    let n_groups = starts.len();
-    for g in 0..n_groups {
-        let g_start = starts[g];
-        let g_end = if g + 1 < n_groups {
-            starts[g + 1]
-        } else {
-            line_end
-        };
-        if g_end <= g_start {
-            continue;
-        }
-        let idxs: Vec<usize> = (0..line.tokens.len()).filter(|&k| groups[k] == g).collect();
-        if idxs.is_empty() {
-            continue;
-        }
-        let weights: Vec<f32> = idxs
-            .iter()
-            .map(|&k| token_weight(&line.tokens[k].text))
-            .collect();
-        let total: f32 = weights.iter().sum::<f32>().max(1e-3);
-        let mut cur = g_start;
-        for (&k, &w) in idxs.iter().zip(&weights) {
-            let d = (g_end - g_start) * w / total;
-            line.tokens[k].start_time = Some(cur);
-            line.tokens[k].end_time = Some(cur + d);
-            line.tokens[k].alignment_source = Some(AlignmentSource::EnhancedLrc);
-            line.tokens[k].alignment_confidence = 1.0;
-            cur += d;
-        }
-    }
+    project_group_times_to_tokens(line, source, default_confidence);
 }
 
 // ── Token 时间分配 / 对齐 ──────────────────────────────────
@@ -702,32 +815,23 @@ fn apply_forced_alignment(
         mora.confidence = aligned.confidence.clamp(0.0, 1.0);
     }
 
-    // 回填 display token 时仍按 char span 聚合 mora；不会把 coarse
-    // ReadingSpan 拆成伪造的一对一字音映射。
+    // First recover one acoustic span per ReadingDisplayGroup. Only after that
+    // do we project the group span to its display glyphs.
     for token in &mut line.tokens {
-        let mut first = None;
-        let mut last = None;
-        let mut confidence = 1.0f32;
-        for mora in &line.moras {
-            if token.char_start >= mora.char_end || mora.char_start >= token.char_end {
-                continue;
-            }
-            if let (Some(start), Some(end)) = (mora.start_time, mora.end_time) {
-                first = Some(first.map_or(start, |v: f32| v.min(start)));
-                last = Some(last.map_or(end, |v: f32| v.max(end)));
-                confidence = confidence.min(mora.confidence);
-            }
-        }
-        if let (Some(start), Some(end)) = (first, last) {
-            token.start_time = Some(start);
-            token.end_time = Some(end);
-            token.alignment_source = Some(AlignmentSource::ForcedAlign);
-            token.alignment_confidence = confidence;
-        } else {
+        token.start_time = None;
+        token.end_time = None;
+    }
+    project_mora_times_to_groups_and_tokens(
+        line,
+        AlignmentSource::ForcedAlign,
+        result.confidence.clamp(0.0, 1.0),
+    );
+    for token in &mut line.tokens {
+        if token.start_time.is_none() || token.end_time.is_none() {
             // 非日语/无读音 token 不应被误报成 FA 成功；给它一个窗口时间，
             // 音高绑定仍会根据真实重叠给出明确的 unpitched reason。
-            token.start_time = token.start_time.or(Some(line_start));
-            token.end_time = token.end_time.or(Some(line_end));
+            token.start_time = Some(line_start);
+            token.end_time = Some(line_end);
             token.alignment_source = Some(AlignmentSource::ForcedAlign);
             token.alignment_confidence = result.confidence.clamp(0.0, 1.0);
         }
@@ -766,9 +870,11 @@ fn build_align_units(line: &LyricLine) -> Vec<AlignUnit> {
         let token_idx = line
             .tokens
             .iter()
-            .position(|t| mora.char_start < t.char_end && t.char_start < mora.char_end);
-        if let Some(ti) = token_idx {
-            covered[ti] = true;
+            .position(|t| mora.display_start < t.char_end && t.char_start < mora.display_end);
+        for (ti, token) in line.tokens.iter().enumerate() {
+            if mora.display_start < token.char_end && token.char_start < mora.display_end {
+                covered[ti] = true;
+            }
         }
         units.push(AlignUnit {
             sort_char: mora.char_start,
@@ -1030,32 +1136,17 @@ fn dp_align_line(
             }
         }
     }
-    // 回填 token 时间:
-    //   - token 的 char 区间相交的 moras → [min start, max end]
-    //     (coarse span 的 moras 会同时覆盖多个 token, 各 token 取自己的区间)
-    //   - 无 mora 覆盖的 token → fallback unit 的时间
+    // 回填 token 时间: 先按 ReadingDisplayGroup 聚合唯一 mora 时间，
+    // 再为完全没有读音的 token 使用时长先验 unit。
     let n_tokens = line.tokens.len();
-    let mut token_first = vec![None; n_tokens];
-    let mut token_last = vec![None; n_tokens];
     let mut token_has_mora = vec![false; n_tokens];
-    for (mi, mora) in line.moras.iter().enumerate() {
-        let Some(&(us, ue)) = unit_times.get(mi) else {
-            continue;
-        };
-        let _ = mi;
-        for (ti, token) in line.tokens.iter().enumerate() {
-            if mora.char_start < token.char_end && token.char_start < mora.char_end {
-                token_has_mora[ti] = true;
-                let f = &mut token_first[ti];
-                if f.is_none_or(|v| us < v) {
-                    *f = Some(us);
-                }
-                let l = &mut token_last[ti];
-                if l.is_none_or(|v| ue > v) {
-                    *l = Some(ue);
-                }
-            }
-        }
+    for token in &mut line.tokens {
+        token.start_time = None;
+        token.end_time = None;
+    }
+    project_mora_times_to_groups_and_tokens(line, AlignmentSource::MoraDp, 0.7);
+    for (ti, token) in line.tokens.iter().enumerate() {
+        token_has_mora[ti] = token.start_time.is_some() && token.end_time.is_some();
     }
     let mut token_known_w = vec![0.0f32; n_tokens];
     let mut token_total_w = vec![0.0f32; n_tokens];
@@ -1071,28 +1162,19 @@ fn dp_align_line(
         }
     }
     for (ti, token) in line.tokens.iter_mut().enumerate() {
-        let times = if token_has_mora[ti] {
-            match (token_first[ti], token_last[ti]) {
-                (Some(s), Some(e)) => Some((s, e)),
-                _ => None,
-            }
-        } else {
+        if !token_has_mora[ti] {
             // fallback unit: 从 unit_times 里找该 token 的先验 unit
-            units
+            if let Some((s, e)) = units
                 .iter()
                 .zip(unit_times.iter())
                 .find(|(u, _)| u.mora_idx.is_none() && u.token_idx == ti)
                 .map(|(_, &(s, e))| (s, e))
-        };
-        if let Some((s, e)) = times {
-            token.start_time = Some(s);
-            token.end_time = Some(e);
-            token.alignment_source = Some(AlignmentSource::MoraDp);
-            token.alignment_confidence = if token_has_mora[ti] {
-                1.0
-            } else {
-                0.0 // 无读音 → 先验, 置信度 0
-            };
+            {
+                token.start_time = Some(s);
+                token.end_time = Some(e);
+                token.alignment_source = Some(AlignmentSource::MoraDp);
+                token.alignment_confidence = 0.0; // 无读音 → 先验
+            }
         }
     }
     let _ = token_known_w;
@@ -1135,6 +1217,28 @@ pub fn bind_pitch_to_tokens(
     let has_events = !pitch_track.musical_notes.is_empty() || !pitch_track.note_events.is_empty();
 
     for line in lines.iter_mut() {
+        // A failed GAME/FCPE cross-validation must not silently fall back to
+        // the legacy FCPE note tracker, otherwise the UI would display a note
+        // that the canonical decision explicitly rejected.
+        if pitch_track.musical_note_source == crate::note_engine::MusicalNoteSource::Game
+            && pitch_track.musical_notes.is_empty()
+            && !pitch_track.raw_game_notes.is_empty()
+        {
+            for token in &mut line.tokens {
+                token.pitch_notes.clear();
+                token.primary_note = None;
+                token.unpitched_reason = match (token.start_time, token.end_time) {
+                    (Some(start), Some(end)) => Some(unpitched_reason_for(
+                        pitch_track,
+                        start,
+                        end,
+                        confidence_threshold,
+                    )),
+                    _ => Some(UnpitchedReason::AlignmentMissing),
+                };
+            }
+            continue;
+        }
         if !has_events {
             // 旧工程回退: 帧级分段
             for token in &mut line.tokens {
@@ -1158,8 +1262,12 @@ pub fn bind_pitch_to_tokens(
 
         // canonical 优先: GAME/canonical musical_notes; 旧工程回退 legacy note_events
         let mora_timing = line.moras.iter().any(|m| m.start_time.is_some());
+        let group_timing = line
+            .reading_display_groups
+            .iter()
+            .any(|group| group.start_time.is_some());
         if !pitch_track.musical_notes.is_empty() {
-            if mora_timing {
+            if mora_timing || group_timing {
                 bind_line_at_mora_level(
                     line,
                     &pitch_track.musical_notes,
@@ -1279,7 +1387,16 @@ fn bind_line_at_mora_level<T: NoteWindow>(
         }
     }
 
-    // 2. 聚合到 token: 取其 char 区间覆盖的 moras 的绑定并集
+    // 2. A display group is the acoustic projection boundary. Do not aggregate
+    // coarse mora spans independently into each glyph; that is exactly how
+    // `二人 -> ふたり` used to duplicate one note chain twice.
+    if !line.reading_display_groups.is_empty() {
+        bind_line_at_display_group_level(line, events, pitch_track, confidence_threshold);
+        return;
+    }
+
+    // Compatibility path for projects serialized before ReadingDisplayGroup.
+    // 取其 char 区间覆盖的 moras 的绑定并集。
     let mora_bindings: Vec<Vec<crate::models::NoteBinding>> =
         line.moras.iter().map(|m| m.note_bindings.clone()).collect();
     let mora_spans: Vec<(usize, usize)> = line
@@ -1360,6 +1477,96 @@ fn bind_line_at_mora_level<T: NoteWindow>(
     }
 }
 
+/// Bind once per ReadingDisplayGroup, then expose the decision only on the
+/// group's lead token. The UI can render the badge across the whole group.
+fn bind_line_at_display_group_level<T: NoteWindow>(
+    line: &mut LyricLine,
+    events: &[T],
+    pitch_track: &PitchTrack,
+    confidence_threshold: f32,
+) {
+    for token in &mut line.tokens {
+        token.pitch_notes.clear();
+        token.primary_note = None;
+        token.unpitched_reason = None;
+    }
+    let mut group_results: Vec<(Vec<PitchNote>, Option<PitchNote>, Option<UnpitchedReason>)> =
+        Vec::with_capacity(line.reading_display_groups.len());
+    for group in &line.reading_display_groups {
+        let (Some(start), Some(end)) = (group.start_time, group.end_time) else {
+            group_results.push((Vec::new(), None, Some(UnpitchedReason::AlignmentMissing)));
+            continue;
+        };
+        let cands = admit_events_for_window(events, start, end);
+        if cands.is_empty() {
+            group_results.push((
+                Vec::new(),
+                None,
+                Some(unpitched_reason_for(
+                    pitch_track,
+                    start,
+                    end,
+                    confidence_threshold,
+                )),
+            ));
+            continue;
+        }
+        let mut notes = Vec::with_capacity(cands.len());
+        let mut scores = Vec::with_capacity(cands.len());
+        for (idx, overlap, _, _, _) in cands {
+            let event = &events[idx];
+            let (event_start, event_end) = event.window();
+            let rs = event_start.max(start);
+            let re = event_end.min(end);
+            notes.push(note_window_to_pitch_note(event, rs, re));
+            scores.push(primary_score(event, overlap));
+        }
+        let primary = scores
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
+            .map(|(index, _)| notes[index].clone());
+        group_results.push((notes, primary, None));
+    }
+
+    let mut lead_tokens = vec![usize::MAX; line.reading_display_groups.len()];
+    for (token_idx, token) in line.tokens.iter().enumerate() {
+        for &group_id in &token.reading_group_ids {
+            if group_id < lead_tokens.len() && lead_tokens[group_id] == usize::MAX {
+                lead_tokens[group_id] = token_idx;
+            }
+        }
+    }
+    for (group, (notes, primary, reason)) in line
+        .reading_display_groups
+        .iter_mut()
+        .zip(group_results.iter())
+    {
+        group.pitch_notes = notes.clone();
+        group.primary_note = primary.clone();
+        group.unpitched_reason = *reason;
+    }
+    for (token_idx, token) in line.tokens.iter_mut().enumerate() {
+        let group_id = token
+            .reading_group_ids
+            .iter()
+            .copied()
+            .find(|&id| id < lead_tokens.len() && lead_tokens[id] == token_idx);
+        if let Some(group_id) = group_id {
+            let (notes, primary, reason) = &group_results[group_id];
+            token.pitch_notes = notes.clone();
+            token.primary_note = primary.clone();
+            token.unpitched_reason = *reason;
+        } else if !token.reading_group_ids.is_empty() {
+            // Non-lead glyphs share the group's timing/highlight but never
+            // claim an independent acoustic note.
+            token.pitch_notes.clear();
+            token.primary_note = None;
+            token.unpitched_reason = None;
+        }
+    }
+}
+
 /// token 层直接绑定 (无 mora 时间时: 纯汉字/拉丁/中文行)
 fn bind_line_at_token_level<T: NoteWindow>(
     line: &mut LyricLine,
@@ -1423,6 +1630,26 @@ fn unpitched_reason_for(
     t_end: f32,
     confidence_threshold: f32,
 ) -> UnpitchedReason {
+    if track.musical_note_source == crate::note_engine::MusicalNoteSource::Game {
+        let uncertain = track
+            .canonical_sung_notes
+            .iter()
+            .filter(|note| note.start < t_end && note.end > t_start)
+            .find(|note| note.class == crate::models::SungNoteClass::Uncertain);
+        if let Some(note) = uncertain {
+            if note.evidence.fcpe_frame_count == 0 || note.evidence.voiced_coverage < 0.20 {
+                return UnpitchedReason::GameUnsupportedByFcpe;
+            }
+            if note
+                .evidence
+                .pitch_delta_cents
+                .is_some_and(|delta| delta.abs() > 180.0)
+            {
+                return UnpitchedReason::LowCrossModelAgreement;
+            }
+            return UnpitchedReason::AmbiguousMusicalNote;
+        }
+    }
     let mut voiced = 0usize;
     let mut confident = 0usize;
     for (i, &t) in track.times.iter().enumerate() {

@@ -137,8 +137,11 @@ impl PitchAnalyzer {
                 note_name: e.note_name.clone(),
                 confidence: e.confidence,
                 source: crate::note_engine::MusicalNoteSource::LegacyFcpeTracker,
+                model_confidence: Some(e.confidence),
                 boundary_confidence: None,
                 is_slur: None,
+                evidence: None,
+                class: None,
             })
             .collect();
 
@@ -153,6 +156,8 @@ impl PitchAnalyzer {
             musical_notes,
             musical_note_source: crate::note_engine::MusicalNoteSource::LegacyFcpeTracker,
             musical_note_model: Some("notetracker-v2".to_string()),
+            raw_game_notes: Vec::new(),
+            canonical_sung_notes: Vec::new(),
         })
     }
 }

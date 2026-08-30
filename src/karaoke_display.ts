@@ -2,6 +2,7 @@
 import { LyricLine, PitchNote } from "./models_lyrics";
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+export type PitchDisplayMode = "compact" | "musical-detail" | "debug-raw";
 
 export class KaraokeDisplay {
   container: HTMLElement;
@@ -13,8 +14,17 @@ export class KaraokeDisplay {
   currentMidi: number | null = null;
   pitchFontSize: number = 48;
   lyricFontSize: number = 18;
-  /// 详细音高模式: 显示 token 的全部音高 (转音 C4→D4→E4), 默认紧凑只显示主音
-  detailedPitch: boolean = false;
+  /// Compact / musically significant detail / debug raw. Raw events are
+  /// intentionally only shown by the debug overlay.
+  displayMode: PitchDisplayMode = "compact";
+
+  get detailedPitch(): boolean {
+    return this.displayMode === "musical-detail";
+  }
+
+  set detailedPitch(value: boolean) {
+    this.displayMode = value ? "musical-detail" : "compact";
+  }
 
   // 音名读数抗抖: vibrato 跨半音边界时 round() 会高频闪烁,
   // 候选音名需持续 noteHoldSecs 才替换 (MIDI 数值保持实时)
@@ -93,7 +103,7 @@ export class KaraokeDisplay {
     // 无歌词 (纯音高) 模式下音高数字必须每帧跟随, 把当前音高并入缓存键;
     // 歌词模式下主内容与音高无关, 只每帧更新右下角小字
     const midiPart = lineIdx < 0 ? (this.currentMidi !== null ? this.currentMidi.toFixed(2) : "none") : "lyrics";
-    const key = `${this.lyricsVersion}|${lineIdx}|${tokenIdx}|${this.pitchFontSize}|${this.lyricFontSize}|${midiPart}`;
+    const key = `${this.lyricsVersion}|${lineIdx}|${tokenIdx}|${this.pitchFontSize}|${this.lyricFontSize}|${this.displayMode}|${midiPart}`;
     if (key !== this.renderedKey) {
       this.renderedKey = key;
       this.midiInfoEl = null;
@@ -178,11 +188,12 @@ export class KaraokeDisplay {
     lyricsRow.style.gap = "8px";
 
     const tokenWidths = this.calculateTokenWidths(line);
+    const groups = this.displayGroups(line);
 
-    line.tokens.forEach((token, i) => {
-      const text = token.text.split("|")[0];
-      const w = tokenWidths[i];
-      const isActive = i === currentTokenIdx;
+    groups.forEach(({ tokenIndices, group }) => {
+      const w = tokenIndices.reduce((sum, index) => sum + tokenWidths[index], 0);
+      const isActive = tokenIndices.includes(currentTokenIdx);
+      const leadToken = line.tokens[tokenIndices[0]];
 
       const noteBox = document.createElement("div");
       noteBox.style.width = `${w}px`;
@@ -190,16 +201,12 @@ export class KaraokeDisplay {
       noteBox.style.justifyContent = "center";
       noteBox.style.alignItems = "center";
 
-      // 默认紧凑模式: primary_note (软评分最高者);
-      // 详细模式: 全部 pitch_notes 以 → 连接 (转音可见)
-      const primary = token.primary_note ?? this.bestNote(token);
-      if (this.detailedPitch && token.pitch_notes.length > 1) {
-        const names = token.pitch_notes
-          .map((n) => {
-            const r = Math.round(n.median_midi);
-            return `${NOTE_NAMES[((r % 12) + 12) % 12]}${Math.floor(r / 12) - 1}`;
-          })
-          .join("→");
+      // Compact uses the evidence-backed primary. Musical detail uses only
+      // consolidated significant notes; raw GAME/FCPE events stay in debug.
+      const notes = group?.pitch_notes?.length ? group.pitch_notes : leadToken.pitch_notes;
+      const primary = group?.primary_note ?? leadToken.primary_note ?? this.bestNote(leadToken);
+      if (this.displayMode === "musical-detail" && notes.length > 1) {
+        const names = this.formatMusicalDetail(notes);
         const noteEl = document.createElement("span");
         noteEl.style.padding = "4px 8px";
         noteEl.style.borderRadius = "6px";
@@ -212,7 +219,7 @@ export class KaraokeDisplay {
         noteEl.style.whiteSpace = "nowrap";
         noteEl.textContent = names;
         noteBox.appendChild(noteEl);
-      } else if (primary) {
+      } else if (this.displayMode !== "debug-raw" && primary) {
         const noteEl = document.createElement("span");
         noteEl.style.padding = "4px 10px";
         noteEl.style.borderRadius = "6px";
@@ -236,23 +243,25 @@ export class KaraokeDisplay {
 
       notesRow.appendChild(noteBox);
 
-      const tokenEl = document.createElement("span");
-      tokenEl.style.width = `${w}px`;
-      tokenEl.style.textAlign = "center";
-      tokenEl.style.fontSize = `${this.lyricFontSize}px`;
-      tokenEl.style.fontWeight = "700";
-      if (isActive) {
-        tokenEl.style.color = "#00d4aa";
-        tokenEl.style.transform = "scale(1.05)";
-        tokenEl.style.transition = "all 0.1s ease";
-      } else {
-        tokenEl.style.color = "#e6e6e6";
-      }
-      tokenEl.textContent = text;
-      tokenEl.style.cursor = "pointer";
-      const li = this.lyricsLines.indexOf(line);
-      tokenEl.onclick = () => this.onTokenDebug?.(li, i);
-      lyricsRow.appendChild(tokenEl);
+      const groupLyrics = document.createElement("span");
+      groupLyrics.style.width = `${w}px`;
+      groupLyrics.style.display = "inline-flex";
+      groupLyrics.style.justifyContent = "center";
+      tokenIndices.forEach((i) => {
+        const token = line.tokens[i];
+        const tokenEl = document.createElement("span");
+        tokenEl.style.width = `${tokenWidths[i]}px`;
+        tokenEl.style.textAlign = "center";
+        tokenEl.style.fontSize = `${this.lyricFontSize}px`;
+        tokenEl.style.fontWeight = "700";
+        tokenEl.style.color = i === currentTokenIdx ? "#00d4aa" : "#e6e6e6";
+        tokenEl.textContent = token.text.split("|")[0];
+        tokenEl.style.cursor = "pointer";
+        const li = this.lyricsLines.indexOf(line);
+        tokenEl.onclick = () => this.onTokenDebug?.(li, i);
+        groupLyrics.appendChild(tokenEl);
+      });
+      lyricsRow.appendChild(groupLyrics);
     });
 
     wrap.appendChild(notesRow);
@@ -291,6 +300,46 @@ export class KaraokeDisplay {
       }
     }
     return best;
+  }
+
+  private formatMusicalDetail(notes: PitchNote[]): string {
+    const names: string[] = [];
+    for (const note of notes) {
+      const rounded = Math.round(note.median_midi);
+      const name = `${NOTE_NAMES[((rounded % 12) + 12) % 12]}${Math.floor(rounded / 12) - 1}`;
+      if (names[names.length - 1] !== name) names.push(name);
+    }
+    if (names.length <= 3) return names.join("→");
+    return `${names[0]}→…→${names[names.length - 1]} ×${names.length}`;
+  }
+
+  private displayGroups(line: LyricLine): Array<{
+    tokenIndices: number[];
+    group?: NonNullable<LyricLine["reading_display_groups"]>[number];
+  }> {
+    const sourceGroups = line.reading_display_groups ?? [];
+    const used = new Set<number>();
+    const result: Array<{
+      tokenIndices: number[];
+      group?: NonNullable<LyricLine["reading_display_groups"]>[number];
+    }> = [];
+    for (const group of sourceGroups) {
+      const tokenIndices = line.tokens
+        .map((token, index) => ({ token, index }))
+        .filter(({ token }) =>
+          (token.char_start ?? 0) < group.char_end && group.char_start < (token.char_end ?? 0),
+        )
+        .map(({ index }) => index);
+      if (tokenIndices.length > 0) {
+        tokenIndices.forEach((index) => used.add(index));
+        result.push({ tokenIndices, group });
+      }
+    }
+    line.tokens.forEach((_, index) => {
+      if (!used.has(index)) result.push({ tokenIndices: [index] });
+    });
+    result.sort((a, b) => a.tokenIndices[0] - b.tokenIndices[0]);
+    return result;
   }
 
   private findCurrentLineAndTokenIdx(): [number, number] {

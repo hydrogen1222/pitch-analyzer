@@ -24,6 +24,13 @@ pub struct PitchTrack {
     /// 产生 canonical notes 的模型标识 (如 "GAME-1.0.3-small")
     #[serde(default)]
     pub musical_note_model: Option<String>,
+    /// Raw GAME candidates retained for diagnostics; production binding uses
+    /// the evidence-backed `musical_notes` track.
+    #[serde(default)]
+    pub raw_game_notes: Vec<crate::note_engine::MusicalNoteEvent>,
+    /// Full evidence and decision data for the canonical note post-processor.
+    #[serde(default)]
+    pub canonical_sung_notes: Vec<CanonicalSungNote>,
     /// 逐帧 log-mel 谱通量 (相邻帧 L1 距离)，音素/音节边界的声学证据。
     /// 与 times 对齐；旧工程文件缺省为空。
     #[serde(default)]
@@ -273,6 +280,8 @@ impl Default for PitchTrack {
             musical_notes: Vec::new(),
             musical_note_source: Default::default(),
             musical_note_model: None,
+            raw_game_notes: Vec::new(),
+            canonical_sung_notes: Vec::new(),
         }
     }
 }
@@ -303,6 +312,14 @@ pub enum UnpitchedReason {
     NoOverlappingNote,
     /// 该行从未完成时间对齐
     AlignmentMissing,
+    /// GAME and FCPE disagree beyond the evidence tolerance.
+    LowCrossModelAgreement,
+    /// GAME returned a region, but FCPE has insufficient voiced support.
+    GameUnsupportedByFcpe,
+    /// More than one note is plausible and no primary note is safe to show.
+    AmbiguousMusicalNote,
+    /// The lyric unit has no sufficiently reliable acoustic alignment.
+    AlignmentLowConfidence,
 }
 
 /// token 与 NoteEvent 的一次软绑定 (many-to-many: 一个 token 可绑多个音, 多个 token 可共享一个音)
@@ -339,6 +356,30 @@ pub struct ReadingSpan {
     pub confidence: f32,
 }
 
+/// Display-level group between language and acoustics. A group can contain
+/// several display glyphs and a different number of moras (`二人` → `ふたり`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadingDisplayGroup {
+    pub id: usize,
+    pub char_start: usize,
+    pub char_end: usize,
+    pub reading_span_id: usize,
+    pub mora_start: usize,
+    pub mora_end: usize,
+    pub surface: String,
+    pub reading: String,
+    #[serde(default)]
+    pub start_time: Option<f32>,
+    #[serde(default)]
+    pub end_time: Option<f32>,
+    #[serde(default)]
+    pub pitch_notes: Vec<PitchNote>,
+    #[serde(default)]
+    pub primary_note: Option<PitchNote>,
+    #[serde(default)]
+    pub unpitched_reason: Option<UnpitchedReason>,
+}
+
 /// 一个莫拉 (拍)。时间与音高绑定在对齐阶段回填。
 ///
 /// display 映射规则 (任务书 5.3): kana-only 路径 reading == surface, char 区间精确;
@@ -364,6 +405,9 @@ pub struct MoraUnit {
     pub display_start: usize,
     #[serde(default)]
     pub display_end: usize,
+    /// 所属显示组；同一组内的 mora 不会被伪造为每个 glyph 的独立声学真值。
+    #[serde(default)]
+    pub display_group_id: usize,
     #[serde(default)]
     pub start_time: Option<f32>,
     #[serde(default)]
@@ -398,6 +442,9 @@ pub struct LyricToken {
     /// 所属 ReadingSpan 下标 (line.reading_spans)
     #[serde(default)]
     pub reading_span_ids: Vec<usize>,
+    /// 所属 display group 下标。
+    #[serde(default)]
+    pub reading_group_ids: Vec<usize>,
     #[serde(default)]
     pub alignment_confidence: f32,
     #[serde(default)]
@@ -419,6 +466,7 @@ impl LyricToken {
             char_start,
             char_end,
             reading_span_ids: Vec::new(),
+            reading_group_ids: Vec::new(),
             alignment_confidence: 0.0,
             alignment_source: None,
             unpitched_reason: None,
@@ -437,6 +485,9 @@ pub struct LyricLine {
     pub primary_text: String,
     #[serde(default)]
     pub translations: Vec<String>,
+    /// `漢字(かな)` annotations. Coordinates are always display-text chars.
+    #[serde(default)]
+    pub ruby_annotations: Vec<crate::japanese::reading::RubyAnnotation>,
     /// 逐字时间是否为程序自动估计 (DP 对齐或均匀分配)。
     /// 自动估计的时间在重新分析音轨后需要重新对齐；
     /// enhanced LRC 自带的逐字时间 (false) 则永远保留。
@@ -445,6 +496,8 @@ pub struct LyricLine {
     /// 原文片段 → 读音 (P1 UniDic 之前: 假名片段自带读音, 汉字片段未知)
     #[serde(default)]
     pub reading_spans: Vec<ReadingSpan>,
+    #[serde(default)]
+    pub reading_display_groups: Vec<ReadingDisplayGroup>,
     /// 行内莫拉序列 (对齐的最小文本单位)
     #[serde(default)]
     pub moras: Vec<MoraUnit>,
@@ -466,8 +519,10 @@ impl LyricLine {
             tokens: Vec::new(),
             primary_text,
             translations,
+            ruby_annotations: Vec::new(),
             token_timing_auto: false,
             reading_spans: Vec::new(),
+            reading_display_groups: Vec::new(),
             moras: Vec::new(),
         }
     }
@@ -480,6 +535,41 @@ pub struct ProjectData {
     pub lyrics: Vec<LyricLine>,
     #[serde(default)]
     pub analysis_params: Option<AnalysisParams>,
+}
+
+/// Independent FCPE evidence for one GAME region.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteEvidence {
+    pub fcpe_frame_count: usize,
+    pub voiced_coverage: f32,
+    pub median_midi: Option<f32>,
+    pub midi_mad_cents: Option<f32>,
+    pub pitch_delta_cents: Option<f32>,
+    pub support_score: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SungNoteClass {
+    Stable,
+    Ornament,
+    Transition,
+    Uncertain,
+}
+
+/// Evidence-backed canonical note used by compact/detail display and binding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanonicalSungNote {
+    pub event_ids: Vec<u32>,
+    pub start: f32,
+    pub end: f32,
+    pub game_midi: f32,
+    pub fcpe_median_midi: Option<f32>,
+    pub display_midi: f32,
+    pub voiced_coverage: f32,
+    pub fcpe_support: f32,
+    pub confidence: f32,
+    pub class: SungNoteClass,
+    pub evidence: NoteEvidence,
 }
 
 /// MIDI → 音名 (C4 / F#4 ...)，NaN → "---"

@@ -11,6 +11,8 @@ export interface PitchTrack {
   musical_notes?: MusicalNoteEvent[];
   musical_note_source?: "Game" | "LegacyFcpeTracker" | "ImportedMidi";
   musical_note_model?: string | null;
+  raw_game_notes?: MusicalNoteEvent[];
+  canonical_sung_notes?: CanonicalSungNote[];
 }
 
 export interface MusicalNoteEvent {
@@ -22,8 +24,34 @@ export interface MusicalNoteEvent {
   note_name: string;
   confidence: number;
   source: "Game" | "LegacyFcpeTracker" | "ImportedMidi";
+  model_confidence?: number | null;
   boundary_confidence?: number | null;
   is_slur?: boolean | null;
+  evidence?: NoteEvidence | null;
+  class?: "Stable" | "Ornament" | "Transition" | "Uncertain" | null;
+}
+
+export interface NoteEvidence {
+  fcpe_frame_count: number;
+  voiced_coverage: number;
+  median_midi?: number | null;
+  midi_mad_cents?: number | null;
+  pitch_delta_cents?: number | null;
+  support_score: number;
+}
+
+export interface CanonicalSungNote {
+  event_ids: number[];
+  start: number;
+  end: number;
+  game_midi: number;
+  fcpe_median_midi?: number | null;
+  display_midi: number;
+  voiced_coverage: number;
+  fcpe_support: number;
+  confidence: number;
+  class: "Stable" | "Ornament" | "Transition" | "Uncertain";
+  evidence: NoteEvidence;
 }
 
 export interface NoteEvent {

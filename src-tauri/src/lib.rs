@@ -2,7 +2,7 @@ use crate::analyzer::PitchAnalyzer;
 use crate::forced_align::{ForcedAlignBackend, MmsForcedAlignBackend};
 use crate::models::{AnalysisParams, LyricLine, NoteTrackingParams, PitchTrack, ProjectData};
 use crate::note_engine::game::{GameModelPaths, GameNoteEngine};
-use crate::note_engine::{MusicalNoteEngine, MusicalNoteSource};
+use crate::note_engine::{CanonicalNotePostProcessor, MusicalNoteEngine, MusicalNoteSource};
 use crate::playback::AudioPlayer;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -454,7 +454,11 @@ async fn analyze_audio(
     if let Some(result) = game_attempt {
         match result {
             Ok((notes, model)) => {
-                track.musical_notes = notes;
+                let processor = CanonicalNotePostProcessor::new(config.confidence_threshold);
+                let canonical = processor.process(&notes, &track);
+                track.raw_game_notes = notes;
+                track.canonical_sung_notes = canonical.clone();
+                track.musical_notes = processor.accepted_events(&canonical);
                 track.musical_note_source = MusicalNoteSource::Game;
                 track.musical_note_model = Some(model);
             }
@@ -800,6 +804,8 @@ fn export_debug_segment(
                 "start": l.start_time,
                 "end": l.end_time,
                 "reading_spans": l.reading_spans,
+                "ruby_annotations": l.ruby_annotations,
+                "reading_display_groups": l.reading_display_groups,
                 "moras": l.moras,
                 "tokens": l.tokens,
                 "alignment_sources": l.tokens.iter().map(|t| t.alignment_source).collect::<Vec<_>>(),
@@ -831,6 +837,8 @@ fn export_debug_segment(
             "source": t.musical_note_source,
             "model": t.musical_note_model,
             "events": musical_note_events.clone(),
+            "raw_game_candidates": t.raw_game_notes.iter().filter(|e| e.end >= w_start && e.start <= w_end).collect::<Vec<_>>(),
+            "canonical_decisions": t.canonical_sung_notes.iter().filter(|e| e.end >= w_start && e.start <= w_end).collect::<Vec<_>>(),
         })),
         "pitch_frames": pitch_frames,
         "musical_note_events": musical_note_events,

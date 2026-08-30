@@ -69,6 +69,8 @@ If you are a **singer**, **content creator**, or **vocal tuner**, this is your g
 
 - 🔬 **Highly Accurate AI Pitch Tracking** — Powered by the FCPE model via ONNX Runtime. Perfect even on quiet/noisy acapella tracks.
 - 🎼 **Canonical Musical Notes** — With the complete GAME ONNX bundle, note events come from the real GAME inference pipeline. Missing models or inference errors are explicitly labeled `LegacyFcpeTracker`.
+- 📝 **Ruby Japanese Lyrics** — Enhanced LRC/TXT accepts `漢字(かな)` ruby, keeps translation lines unchanged, and uses one acoustic display group for multi-glyph readings such as `二人(ふたり)`.
+- 🎚️ **Evidence-aware Note Display** — Compact, Musical Detail, and Debug Raw modes separate stable FCPE-supported notes from uncertain GAME candidates; unsupported notes remain explainable in the debug overlay.
 - 🎹 **Visual Piano Roll** — A scrolling view showing your pitch curve aligned over piano keys with a real-time playback cursor.
 - 🎤 **Karaoke Lyrics Sync** — Import LRC (with/without translations) or plain text TXT. Alignment priority is Enhanced LRC, optional real MMS-FA, mora-aware acoustic DP, then weighted fallback.
 - 📋 **One-Click Subtitle Export (SRT)** — Generates subtitle tracks with note annotations (e.g. `Hello [C4]`) for video editing.
@@ -131,7 +133,7 @@ MMS-FA is opt-in because it requires a Python environment with `torch` and `torc
    - **Pop**: Good for standard pop/rock vocal tracks.
    - **Folk**: Good for solo acoustic or clean acapellas.
    - **Classical**: Snaps pitches to exact piano notes (Quantized).
-3. **Add Lyrics**: Click **"🎵 Import LRC"** (recommended for synced lyrics) or **"📝 Import TXT"**. The words will align with the notes. Active syllables will glow green as they play!
+3. **Add Lyrics**: Click **"🎵 Import LRC"** (recommended for synced lyrics) or **"📝 Import TXT"**. The words will align with the notes. Active syllables will glow green as they play! Japanese ruby may be written as `漢字(かな)`; choose a pitch display mode for compact names, musical detail, or evidence diagnostics.
 4. **Playback**: Press the play (▶) button. You can slide the progress bar or change volume.
 5. **Export Subtitles**: Click **"📋 Export SRT"** to save your annotated subtitles. Drag the SRT file into Premiere, CapCut, or DaVinci Resolve!
 
@@ -146,6 +148,7 @@ MMS-FA is opt-in because it requires a Python environment with `torch` and `torc
 - **Peak Filtering (Median)**: Removes sudden pitch spikes caused by glitches or breaths.
 - **Curve Smoothing**: Smooths out natural voice vibrato to make the pitch track cleaner.
 - **Quantize to Semitone**: Snaps your pitch line directly to the nearest piano keys, turning fluid slides into distinct musical notes.
+- **Pitch Display Mode**: `Compact` shows one note per acoustic lyric group, `Musical Detail` shows consolidated note movement, and `Debug Raw` exposes evidence and rejection reasons for GAME candidates.
 
 <p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 
@@ -206,6 +209,8 @@ pnpm tauri build
 ## ✨ 核心功能
 
 - 🔬 **极准的 AI 音高跟踪** — 基于 FCPE 模型与 ONNX Runtime 硬件加速，干净人声和略带底噪的清唱皆可精准感应。
+- 🈶 **日语注音与多字一音** — 支持 `漢字(かな)` 注音，显示坐标以去注音后的文字为准；如 `二人(ふたり)` 作为一个声学显示组，不会重复绑定 mora 或音符。
+- 🎚️ **高可信音符显示** — Compact、Musical Detail、Debug Raw 三种模式分别面向演唱提示、音乐细节和证据审计；GAME 候选会与 FCPE 音高证据融合，低可信结果明确解释并从生产音符中剔除。
 - 🎹 **直观的钢琴卷帘窗** — 绿色的音高曲线在钢琴键背景上一目了然，带播放光标指示。
 - 🎤 **卡拉OK 歌词自动对齐** — 导入 LRC（支持双语合并）或 TXT 文本，程序自动分词并对齐，播放时唱到的字会变成**青色并微微放大发光**。
 - 📋 **一键导出 SRT 字幕** — 导出带音名标注（如 `你好 [C4]`）的字幕文件，方便导入各大视频剪辑软件。
@@ -268,7 +273,7 @@ MMS-FA 是可选后端，需要安装含 `torch` 和 `torchaudio` 的 Python 环
    - **流行**：适配绝大多数流行与摇滚人声。
    - **民谣**：适配比较干净的民谣清唱、弹唱人声。
    - **古典**：适配美声或合唱，音高线会自动吸附到钢琴键上。
-3. **导入歌词**：点击 **"🎵 导入 LRC"**（带时间戳的歌词文件）或 **"📝 导入 TXT"**（纯文本）。歌词会显示在顶部面板，播放时唱到的字会变成**青色并微微放大发光**。
+3. **导入歌词**：点击 **"🎵 导入 LRC"**（带时间戳的歌词文件）或 **"📝 导入 TXT"**（纯文本）。歌词会显示在顶部面板，播放时唱到的字会变成**青色并微微放大发光**。日语注音写作 `漢字(かな)`；右侧音符显示模式可切换紧凑提示、音乐细节或原始证据调试信息。
 4. **播放试听**：点击下方的播放按钮 (▶) 即可试听。拖拽滚动条可以调节音轨进度，拖动音量条调节音量大小。
 5. **导出成果**：点击 **"📋 导出 SRT"**，可直接将带音名字幕保存到本地。导入剪辑软件（如剪映、PR、FCP）即可制作出带有音符提示的高档卡拉OK字幕！
 
@@ -283,6 +288,7 @@ MMS-FA 是可选后端，需要安装含 `torch` 和 `torchaudio` 的 Python 环
 - **峰值过滤 (中值)**：自动剔除音高中由于喷麦、呼吸引起的突变尖峰。
 - **曲线平滑**：消减歌手嗓音中细微的多余抖动和颤音，让线条更平滑。
 - **对齐到半音**：开启后，滑动音高会变成类似于琴键的一格格阶梯，自动归类到最邻近的音符上。
+- **音符显示模式**：Compact 按声学歌词组显示一个提示音；Musical Detail 显示合并后的音符变化；Debug Raw 展示 GAME 候选、FCPE 证据和拒绝原因。
 
 <p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 

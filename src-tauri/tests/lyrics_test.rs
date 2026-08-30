@@ -619,8 +619,11 @@ fn round3_canonical_note_track_is_primary_binding_source() {
             note_name: "C5".to_string(),
             confidence: 0.95,
             source: MusicalNoteSource::Game,
+            model_confidence: None,
             boundary_confidence: Some(0.9),
             is_slur: Some(false),
+            evidence: None,
+            class: None,
         }],
         note_events: vec![NoteEvent {
             start: 0.0,

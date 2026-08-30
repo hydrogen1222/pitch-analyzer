@@ -11,7 +11,7 @@
 // presence[i] > 0.5 时 round(scores[i]) 为该音符 MIDI 音高。
 // Mode B (外部 boundaries): known_durations -> dur2bd.onnx -> boundaries。
 //
-// 模型目录 (config.json + encoder/segmenter/estimator/bd2dur.onnx) 缺失时
+// 模型目录 (config.json + encoder/segmenter/estimator/bd2dur/dur2bd.onnx) 缺失时
 // try_load 返回 Err, 上层必须可见地 fallback 到 LegacyFcpeNoteTracker
 // (禁止伪造 source=Game 的假输出 —— Round3 审计 P0)。
 
@@ -21,6 +21,119 @@ use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::{DynTensor, Tensor};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+/// Reference fixture format used by the development parity harness. It is
+/// intentionally model-output-only so the official GAME implementation can
+/// be run outside this Rust application and compared deterministically.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GameReferenceNote {
+    pub start: f32,
+    pub end: f32,
+    pub midi: f32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GameParityReport {
+    pub reference_note_count: usize,
+    pub rust_note_count: usize,
+    pub pitch_agreement: f32,
+    pub onset_mae: f32,
+    pub offset_mae: f32,
+    pub note_count_difference: f32,
+}
+
+/// Compare sorted Rust notes with the same-WAV official/reference output.
+/// The acceptance thresholds mirror the Round3.2 task book and are kept in
+/// one place so the harness and CI report cannot silently diverge.
+pub fn compare_game_reference(
+    rust_notes: &[MusicalNoteEvent],
+    reference: &[GameReferenceNote],
+) -> GameParityReport {
+    let mut actual: Vec<&MusicalNoteEvent> = rust_notes.iter().collect();
+    actual.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut expected: Vec<&GameReferenceNote> = reference.iter().collect();
+    expected.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let compared = actual.len().min(expected.len());
+    let pitch_agreement = if compared == 0 {
+        if actual.is_empty() && expected.is_empty() {
+            1.0
+        } else {
+            0.0
+        }
+    } else {
+        actual
+            .iter()
+            .zip(expected.iter())
+            .take(compared)
+            .filter(|(a, b)| (a.midi_float - b.midi).abs() <= 0.5)
+            .count() as f32
+            / compared as f32
+    };
+    let onset_mae = if compared == 0 {
+        f32::INFINITY
+    } else {
+        actual
+            .iter()
+            .zip(expected.iter())
+            .take(compared)
+            .map(|(a, b)| (a.start - b.start).abs())
+            .sum::<f32>()
+            / compared as f32
+    };
+    let offset_mae = if compared == 0 {
+        f32::INFINITY
+    } else {
+        actual
+            .iter()
+            .zip(expected.iter())
+            .take(compared)
+            .map(|(a, b)| (a.end - b.end).abs())
+            .sum::<f32>()
+            / compared as f32
+    };
+    let note_count_difference = if reference.is_empty() {
+        if rust_notes.is_empty() {
+            0.0
+        } else {
+            1.0
+        }
+    } else {
+        (rust_notes.len() as f32 - reference.len() as f32).abs() / reference.len() as f32
+    };
+    GameParityReport {
+        reference_note_count: reference.len(),
+        rust_note_count: rust_notes.len(),
+        pitch_agreement,
+        onset_mae,
+        offset_mae,
+        note_count_difference,
+    }
+}
+
+pub fn assert_game_parity(report: &GameParityReport) -> Result<(), String> {
+    if report.pitch_agreement < 0.90
+        || report.onset_mae > 0.050
+        || report.offset_mae > 0.080
+        || report.note_count_difference > 0.10
+    {
+        return Err(format!(
+            "GAME parity failed: pitch={:.3}, onset={:.3}s, offset={:.3}s, count_delta={:.3}",
+            report.pitch_agreement,
+            report.onset_mae,
+            report.offset_mae,
+            report.note_count_difference
+        ));
+    }
+    Ok(())
+}
 
 /// 模型文件集合 (任务书 §13)
 #[derive(Debug, Clone)]
@@ -104,6 +217,7 @@ impl GameConfig {
 struct ChunkOutput {
     _boundaries: Vec<u8>,
     durations: Vec<f32>,
+    mask_n: Vec<u8>,
     presence: Vec<f32>,
     scores: Vec<f32>,
 }
@@ -401,6 +515,7 @@ impl GameNoteEngine {
             return Ok(ChunkOutput {
                 _boundaries: boundaries,
                 durations,
+                mask_n,
                 presence: Vec::new(),
                 scores: Vec::new(),
             });
@@ -410,6 +525,7 @@ impl GameNoteEngine {
         Ok(ChunkOutput {
             _boundaries: boundaries,
             durations,
+            mask_n,
             presence,
             scores,
         })
@@ -549,20 +665,43 @@ impl MusicalNoteEngine for GameNoteEngine {
                 continue;
             }
 
-            // durations 单位自适应: 模型可能输出秒或帧, 按总和≈chunk 时长判定
-            let sum: f32 = out.durations.iter().sum();
+            // 官方 GAME 的 bd2dur 输出已经是秒；Game::get_midi 直接把
+            // durations 累加到音符边界，不根据 chunk 时长二次归一化。
+            // 这点必须保持固定，否则不同长度切片会产生与官方实现不同的
+            // onset/offset。maskN 只保留有效的 note slots。
+            let valid_durations: Vec<f32> = out
+                .durations
+                .iter()
+                .enumerate()
+                .filter_map(|(i, duration)| {
+                    (out.mask_n.get(i).copied().unwrap_or(0) != 0).then_some(*duration)
+                })
+                .collect();
+            let sum: f32 = valid_durations.iter().sum();
             let chunk_dur = wave.len() as f32 / sr as f32;
-            let scale = if (sum - chunk_dur).abs() < chunk_dur * 0.2 {
-                1.0
-            } else if ((sum * self.config.timestep) - chunk_dur).abs() < chunk_dur * 0.2 {
-                self.config.timestep
-            } else {
-                chunk_dur / sum.max(1e-6)
-            };
+            if !sum.is_finite() || sum <= 0.0 {
+                return Err("GAME bd2dur returned no positive valid duration"
+                    .to_string()
+                    .into());
+            }
+            if (sum - chunk_dur).abs() > chunk_dur * 0.25 {
+                return Err(format!(
+                    "GAME bd2dur duration mismatch: output={sum:.4}s, chunk={chunk_dur:.4}s"
+                )
+                .into());
+            }
 
             let mut t = *c_start as f32 / sr as f32;
             for i in 0..out.durations.len() {
-                let d = out.durations[i] * scale;
+                if out.mask_n.get(i).copied().unwrap_or(0) == 0 {
+                    continue;
+                }
+                let d = out.durations[i];
+                if !d.is_finite() || d <= 0.0 {
+                    return Err(
+                        format!("GAME bd2dur returned invalid duration at slot {i}: {d}").into(),
+                    );
+                }
                 let (note_start, note_end) = (t, t + d);
                 t = note_end;
                 if out.presence.get(i).copied().unwrap_or(0.0) > 0.5 {
@@ -575,10 +714,17 @@ impl MusicalNoteEngine for GameNoteEngine {
                         midi_float: midi_f,
                         midi_rounded: midi,
                         note_name: midi_to_note_name(midi_f),
-                        confidence: 0.9,
+                        // The released GAME ONNX estimator exposes a hard
+                        // presence decision, not a calibrated confidence.
+                        // Keep this raw candidate unscored; FCPE evidence is
+                        // attached by CanonicalNotePostProcessor.
+                        confidence: 0.0,
                         source: MusicalNoteSource::Game,
+                        model_confidence: None,
                         boundary_confidence: None,
-                        is_slur: Some(false),
+                        is_slur: None,
+                        evidence: None,
+                        class: None,
                     });
                     next_id += 1;
                 }

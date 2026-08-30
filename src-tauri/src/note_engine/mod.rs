@@ -9,9 +9,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod game;
 pub mod legacy_fcpe;
+pub mod postprocess;
 
 pub use game::GameNoteEngine;
 pub use legacy_fcpe::LegacyFcpeNoteTracker;
+pub use postprocess::CanonicalNotePostProcessor;
 
 /// 音乐音符数据来源
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -94,12 +96,23 @@ pub struct MusicalNoteEvent {
     pub confidence: f32,
     pub source: MusicalNoteSource,
 
+    /// Raw model confidence, when the model exposes one. GAME's released
+    /// estimator only exposes a hard presence decision, so this stays None
+    /// until an evidence-backed canonical decision is produced.
+    #[serde(default)]
+    pub model_confidence: Option<f32>,
+
     /// 边界置信度 (GAME 输出, 可选)
     #[serde(default)]
     pub boundary_confidence: Option<f32>,
     /// 是否连音/连音线 (可选)
     #[serde(default)]
     pub is_slur: Option<bool>,
+    /// Evidence attached by the canonical post-processor.
+    #[serde(default)]
+    pub evidence: Option<crate::models::NoteEvidence>,
+    #[serde(default)]
+    pub class: Option<crate::models::SungNoteClass>,
 }
 
 impl MusicalNoteEvent {

@@ -11,8 +11,12 @@ use pitch_analyzer_tauri_lib::lyrics::{
 };
 use pitch_analyzer_tauri_lib::models::AnalysisParams;
 use pitch_analyzer_tauri_lib::models::PitchTrack;
-use pitch_analyzer_tauri_lib::note_engine::game::{GameModelPaths, GameNoteEngine};
-use pitch_analyzer_tauri_lib::note_engine::MusicalNoteEngine;
+use pitch_analyzer_tauri_lib::note_engine::game::{
+    assert_game_parity, compare_game_reference, GameModelPaths, GameNoteEngine, GameReferenceNote,
+};
+use pitch_analyzer_tauri_lib::note_engine::{
+    CanonicalNotePostProcessor, MusicalNoteEngine, MusicalNoteSource,
+};
 use std::path::{Path, PathBuf};
 
 fn require_acceptance() {
@@ -126,6 +130,36 @@ fn required_fixture(name: &str) -> PathBuf {
 }
 
 #[test]
+#[ignore = "compares the same WAV against an official GAME/reference JSON"]
+fn game_official_reference_parity() {
+    require_acceptance();
+    let audio = required_fixture("GAME_PARITY_AUDIO");
+    let reference_path = required_fixture("GAME_PARITY_REFERENCE");
+    let reference_value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&reference_path).expect("read GAME reference JSON"),
+    )
+    .expect("parse GAME reference JSON");
+    let reference: Vec<GameReferenceNote> = if reference_value.is_array() {
+        serde_json::from_value(reference_value).expect("reference JSON array of notes")
+    } else {
+        serde_json::from_value(reference_value["notes"].clone())
+            .expect("reference JSON object.notes array")
+    };
+
+    pitch_analyzer_tauri_lib::try_init_ort_dylib();
+    let engine = GameNoteEngine::try_load(&game_dir()).expect("GAME engine must load");
+    let decoded =
+        pitch_analyzer_tauri_lib::audio::load_audio_mono(&audio, engine.target_sample_rate())
+            .expect("decode parity audio");
+    let actual = engine
+        .transcribe(&decoded.samples, decoded.sample_rate, None)
+        .expect("Rust GAME inference");
+    let report = compare_game_reference(&actual, &reference);
+    println!("GAME parity report: {report:?}");
+    assert_game_parity(&report).expect("Rust GAME must match official reference");
+}
+
+#[test]
 #[ignore = "downloads/loads the real MMS-FA acoustic model"]
 fn forced_align_real_model_returns_monotonic_moras() {
     require_acceptance();
@@ -188,8 +222,12 @@ fn round3_e2e_fixture_has_canonical_track_and_aligned_lyrics() {
         .transcribe(&decoded.samples, decoded.sample_rate, None)
         .expect("GAME E2E inference");
     assert!(!notes.is_empty(), "E2E GAME track is empty");
-    track.musical_notes = notes;
-    track.musical_note_source = pitch_analyzer_tauri_lib::note_engine::MusicalNoteSource::Game;
+    let processor = CanonicalNotePostProcessor::new(0.3);
+    let canonical = processor.process(&notes, &track);
+    track.raw_game_notes = notes;
+    track.canonical_sung_notes = canonical.clone();
+    track.musical_notes = processor.accepted_events(&canonical);
+    track.musical_note_source = MusicalNoteSource::Game;
     track.musical_note_model = Some(engine.model_tag().to_string());
     let track = PitchTrack {
         musical_notes: track.musical_notes,

@@ -1,17 +1,145 @@
 // 日语读音 provider 抽象
 //
 // 优先级 (任务书 §2.4):
-//   用户 override > ruby/furigana (未支持) > UniDic 词典 (P1, 未接入) > KanaOnly > heuristic
+//   用户 override > ruby/furigana > UniDic 词典 > KanaOnly > heuristic
 //
 // Lindera + UniDic 接入说明 (P1):
-//   - lindera (MIT) + UniDic 词典资源, 词典作为可选外部资源打包 (不要默认塞进主 exe,
-//     见任务书 §10), 运行时通过 app_config_dir / 资源目录加载, 带 hash/版本校验
-//   - 实现 JapaneseReadingProvider, 返回的 ReadingSpan 需带 byte span 与读音
+//   - 当前版本通过 lindera 的 embed-unidic 特性直接提供词典读音
+//   - JapaneseReadingProvider 返回 ReadingSpan，所有下游坐标统一为 display char
 //   - 歌曲特殊读法 (運命→さだめ) 通过 ReadingOverride 接口覆盖词典结果
-//   - 本文件预留 override 接口与 provider trait, 词典接入不改变下游数据模型
+//   - Ruby 注音在 mora 展开前进入 ReadingOverride，优先级高于词典
 
 use crate::japanese::mora;
 use crate::models::ReadingSpan;
+
+/// Ruby 注音解析结果。所有 display_* 坐标均以去掉注音标记后的 display_text
+/// 为基准；raw_* 坐标仅用于诊断原始标记。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RubyAnnotation {
+    pub surface: String,
+    pub reading: String,
+    pub display_start: usize,
+    pub display_end: usize,
+    pub raw_start: usize,
+    pub raw_end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ParsedRubyText {
+    pub raw_text: String,
+    pub display_text: String,
+    pub annotations: Vec<RubyAnnotation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RubyParseError {
+    InvalidInput(String),
+}
+
+fn is_kanji(c: char) -> bool {
+    ('\u{3400}'..='\u{4DBF}').contains(&c) || ('\u{4E00}'..='\u{9FFF}').contains(&c)
+}
+
+fn is_ruby_reading_char(c: char) -> bool {
+    mora::is_kana_char(c) || c == '\u{30FC}' || c == '\u{30FB}'
+}
+
+fn is_escaped(chars: &[char], index: usize) -> bool {
+    let mut backslashes = 0usize;
+    let mut i = index;
+    while i > 0 && chars[i - 1] == '\\' {
+        backslashes += 1;
+        i -= 1;
+    }
+    backslashes % 2 == 1
+}
+
+/// 解析 `漢字(かな)` 注音标记。
+///
+/// 不符合 Ruby 规则的括号按普通歌词文本保留；反斜杠只用于转义括号，
+/// 不会进入 display_text。这使 malformed Ruby 不会破坏歌词或触发 panic。
+pub fn parse_ruby_text(raw: &str) -> Result<ParsedRubyText, RubyParseError> {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut display = String::new();
+    let mut annotations = Vec::new();
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() && matches!(chars[i + 1], '(' | ')') {
+            display.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+
+        if chars[i] == '(' && !is_escaped(&chars, i) && i > 0 && is_kanji(chars[i - 1]) {
+            let surface_start = (0..i)
+                .rev()
+                .find(|&j| !is_kanji(chars[j]))
+                .map(|j| j + 1)
+                .unwrap_or(0);
+            let close = ((i + 1)..chars.len()).find(|&j| chars[j] == ')' && !is_escaped(&chars, j));
+            if let Some(close) = close {
+                let reading_chars = &chars[i + 1..close];
+                if !reading_chars.is_empty()
+                    && reading_chars.iter().all(|&c| is_ruby_reading_char(c))
+                {
+                    let surface: String = chars[surface_start..i].iter().collect();
+                    let reading: String = reading_chars.iter().collect();
+                    let surface_len = surface.chars().count();
+                    let display_end = display.chars().count();
+                    let display_start = display_end.saturating_sub(surface_len);
+                    annotations.push(RubyAnnotation {
+                        surface,
+                        reading,
+                        display_start,
+                        display_end,
+                        raw_start: surface_start,
+                        raw_end: close + 1,
+                    });
+                    i = close + 1;
+                    continue;
+                }
+            }
+        }
+
+        display.push(chars[i]);
+        i += 1;
+    }
+
+    Ok(ParsedRubyText {
+        raw_text: raw.to_string(),
+        display_text: display,
+        annotations,
+    })
+}
+
+/// 将一个相对于去 timing-tag 文本的 raw char offset 映射到 display offset。
+/// Enhanced-LRC 的 `<time>` 标签应先被移除，再应用 Ruby 删除映射。
+pub fn ruby_display_offset(parsed: &ParsedRubyText, raw_position: usize) -> usize {
+    for annotation in &parsed.annotations {
+        if raw_position < annotation.raw_start {
+            break;
+        }
+        if raw_position < annotation.raw_end {
+            let within_surface = raw_position.saturating_sub(annotation.raw_start);
+            return annotation
+                .display_start
+                .saturating_add(within_surface.min(annotation.surface.chars().count()));
+        }
+    }
+    let removed: usize = parsed
+        .annotations
+        .iter()
+        .filter(|annotation| annotation.raw_end <= raw_position)
+        .map(|annotation| {
+            annotation
+                .raw_end
+                .saturating_sub(annotation.raw_start)
+                .saturating_sub(annotation.surface.chars().count())
+        })
+        .sum();
+    raw_position.saturating_sub(removed)
+}
 
 /// 日语读音分析器抽象。实现必须无锁可共享 (Send + Sync)。
 pub trait JapaneseReadingProvider: Send + Sync {
@@ -108,19 +236,47 @@ impl JapaneseReadingProvider for KanaOnlyProvider {
 /// 应用 override: 命中 char 区间的 span 更新读音并提升 confidence,
 /// 然后按新读音重算所有 span 的 mora 区间 (override 可能改变拍数)
 pub fn apply_reading_overrides(
-    spans: &mut [ReadingSpan],
+    spans: &mut Vec<ReadingSpan>,
     overrides: &[ReadingOverride],
-    _text: &str,
+    text: &str,
 ) {
+    // A Ruby span is the language truth even if the dictionary segmented the
+    // surface into several morphemes. Replace the complete intersecting range
+    // with one span so `二人(ふたり)` can never duplicate all three moras onto
+    // both glyphs.
     for ov in overrides {
-        for span in spans.iter_mut() {
-            let overlaps = ov.char_start < span.char_end && span.char_start < ov.char_end;
-            if overlaps {
-                span.reading = ov.reading.clone();
-                span.pronunciation = ov.reading.clone();
-                span.confidence = 1.0;
-            }
-        }
+        let first = spans
+            .iter()
+            .position(|span| ov.char_start < span.char_end && span.char_start < ov.char_end);
+        let Some(first) = first else { continue };
+        let last = spans
+            .iter()
+            .rposition(|span| ov.char_start < span.char_end && span.char_start < ov.char_end)
+            .unwrap_or(first);
+        let char_start = ov.char_start;
+        let char_end = ov.char_end;
+        let surface: String = text
+            .chars()
+            .skip(char_start)
+            .take(char_end.saturating_sub(char_start))
+            .collect();
+        let display_start = spans[first].display_start.min(char_start);
+        let display_end = spans[last].display_end.max(char_end);
+        spans.splice(
+            first..=last,
+            [ReadingSpan {
+                surface,
+                pronunciation: ov.reading.clone(),
+                reading: ov.reading.clone(),
+                char_start,
+                char_end,
+                display_start,
+                display_end,
+                mora_start: 0,
+                mora_end: 0,
+                confidence: 1.0,
+            }],
+        );
     }
     // 顺序重算 mora 区间: 假名 span 按读音解析, 非假名 span 0 拍
     let mut offset = 0usize;

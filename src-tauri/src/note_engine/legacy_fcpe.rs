@@ -35,8 +35,11 @@ impl LegacyFcpeNoteTracker {
                 note_name: ev.note_name,
                 confidence: ev.confidence,
                 source: MusicalNoteSource::LegacyFcpeTracker,
+                model_confidence: Some(ev.confidence),
                 boundary_confidence: None,
                 is_slur: None,
+                evidence: None,
+                class: None,
             })
             .collect()
     }

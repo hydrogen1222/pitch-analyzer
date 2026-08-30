@@ -397,7 +397,7 @@ async function initApp() {
   loadProjBtn = document.querySelector("#load-proj");
   exportSrtBtn = document.querySelector("#export-srt");
   exportAssBtn = document.querySelector("#export-ass");
-  const detailedPitchInput = document.querySelector("#detailed-pitch") as HTMLInputElement | null;
+  const pitchDisplayModeInput = document.querySelector("#pitch-display-mode") as HTMLSelectElement | null;
   pitchFontInput = document.querySelector("#font-pitch");
   lyricFontInput = document.querySelector("#font-lyric");
   selectModelBtn = document.querySelector("#select-model");
@@ -467,8 +467,11 @@ async function initApp() {
     try { await invoke("playback_set_volume", { vol: v }); } catch (_) {}
   });
 
-  detailedPitchInput?.addEventListener("change", () => {
-    if (karaokeDisplay) karaokeDisplay.detailedPitch = detailedPitchInput?.checked ?? false;
+  pitchDisplayModeInput?.addEventListener("change", () => {
+    if (karaokeDisplay) {
+      karaokeDisplay.displayMode = (pitchDisplayModeInput.value || "compact") as "compact" | "musical-detail" | "debug-raw";
+      karaokeDisplay.render();
+    }
   });
 
   // ── Debug Overlay (任务书 E1): 点击 token 显示分层定位信息 ──
@@ -505,11 +508,25 @@ async function initApp() {
     lines.push(`Surface: ${token.text}`);
     const spans = (token.reading_span_ids ?? []).map((si) => line.reading_spans?.[si]).filter(Boolean);
     for (const sp of spans) {
-      lines.push(`Reading: ${sp!.reading || "(未知, 需词典/override)"}  [${sp!.surface}] conf=${sp!.confidence.toFixed(2)}`);
+      const ruby = (line.ruby_annotations ?? []).find((annotation) =>
+        annotation.display_start === sp!.display_start && annotation.display_end === sp!.display_end,
+      );
+      lines.push(`Reading: ${sp!.reading || "(未知, 需词典/override)"}  [${sp!.surface}] source=${ruby ? "UserRuby" : "UniDic/Kana"} conf=${sp!.confidence.toFixed(2)}`);
     }
     const cs = token.char_start ?? 0;
     const ce = token.char_end ?? 0;
-    const moras = (line.moras ?? []).filter((m) => cs < m.char_end && m.char_start < ce);
+    const groupIds = token.reading_group_ids ?? [];
+    const groups = groupIds.map((id) => line.reading_display_groups?.[id]).filter(Boolean);
+    for (const group of groups) {
+      lines.push(`Display group: ${group!.surface} -> ${group!.reading || "(未知)"} reason=${group!.unpitched_reason ?? "-"}`);
+    }
+    const moraIds = new Set<number>();
+    for (const group of groups) {
+      for (let mi = group!.mora_start; mi < group!.mora_end; mi++) moraIds.add(mi);
+    }
+    const moras = (line.moras ?? []).filter((m, index) =>
+      moraIds.size > 0 ? moraIds.has(index) : cs < m.char_end && m.char_start < ce,
+    );
     const canonicalNotes = state.track?.musical_notes ?? [];
     if (moras.length > 0) {
       lines.push(`Moras: ${moras.map((m) => m.kana).join(" / ")}`);
@@ -529,8 +546,11 @@ async function initApp() {
     }
     lines.push(`Token time: ${token.start_time?.toFixed(3) ?? "?"} - ${token.end_time?.toFixed(3) ?? "?"}`);
     lines.push(`Alignment: ${token.alignment_source ?? "?"} conf=${(token.alignment_confidence ?? 0).toFixed(2)}`);
+    if (groups.length > 0) {
+      lines.push(`Group timing: ${groups[0]!.start_time?.toFixed(3) ?? "?"} - ${groups[0]!.end_time?.toFixed(3) ?? "?"}`);
+    }
     if (token.pitch_notes?.length) {
-      lines.push(`Notes (${token.pitch_notes.length}):`);
+      lines.push(`Canonical notes (${token.pitch_notes.length}):`);
       for (const n of token.pitch_notes) {
         lines.push(`  ${noteNameOf(n.median_midi)}  ${n.start_time.toFixed(3)}-${n.end_time.toFixed(3)} conf=${n.confidence_mean.toFixed(2)}`);
       }
@@ -540,6 +560,13 @@ async function initApp() {
     lines.push(`Unpitched reason: ${token.unpitched_reason ?? "-"}`);
     lines.push(`Note engine: ${state.track?.musical_note_source ?? "LegacyFcpeTracker"} / ${state.track?.musical_note_model ?? "legacy-notetracker"}`);
     lines.push(`Tracker: v${state.track?.note_events?.[0]?.tracker_version ?? "?"}`);
+    const canonical = state.track?.canonical_sung_notes ?? [];
+    const rawGame = state.track?.raw_game_notes ?? [];
+    lines.push(`GAME raw candidates: ${rawGame.length}`);
+    lines.push(`Canonical decisions: ${canonical.length}`);
+    canonical.forEach((note) => {
+      lines.push(`  ${noteNameOf(note.display_midi)} ${note.start.toFixed(3)}-${note.end.toFixed(3)} class=${note.class} support=${note.fcpe_support.toFixed(2)} FCPE=${note.fcpe_median_midi?.toFixed(2) ?? "-"} delta=${note.evidence.pitch_delta_cents?.toFixed(0) ?? "-"}c`);
+    });
     debugContent.textContent = lines.join("\n");
     debugPanel.style.display = "block";
   };
