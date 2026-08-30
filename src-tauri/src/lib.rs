@@ -11,10 +11,12 @@ pub mod audio;
 pub mod decoder;
 pub mod dsp;
 pub mod export;
+pub mod forced_align;
 pub mod japanese;
 pub mod lyrics;
 pub mod mel;
 pub mod models;
+pub mod note_engine;
 pub mod note_tracker;
 pub mod playback;
 

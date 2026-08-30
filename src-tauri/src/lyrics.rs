@@ -106,11 +106,18 @@ pub fn tokenize(text: &str) -> Vec<String> {
 }
 
 /// 填充行的日语三层文本结构: reading_spans → moras → token↔span 关联。
-/// KanaOnly: 假名片段自带读音, 汉字片段读音未知 (P1 接 UniDic 后替换 provider)。
+/// 优先级: UniDic (Lindera) > KanaOnly (纯假名快速兜底)
 fn build_japanese_layers(line: &mut LyricLine) {
-    let provider = KanaOnlyProvider;
-    let Ok(spans) = provider.analyze(&line.primary_text) else {
-        return;
+    let unidic = crate::japanese::LinderaUnidicProvider;
+    let spans = if let Ok(s) = unidic.analyze(&line.primary_text) {
+        s
+    } else {
+        let kana_only = KanaOnlyProvider;
+        if let Ok(s) = kana_only.analyze(&line.primary_text) {
+            s
+        } else {
+            return;
+        }
     };
 
     // moras: 必须从读音 (pronunciation 优先, 其次 reading) 展开, 而非 surface

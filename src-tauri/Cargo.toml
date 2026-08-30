@@ -31,3 +31,4 @@ rubato = "0.16"
 rustfft = "6.2"
 regex = "1"
 rodio = { version = "0.20", default-features = false, features = ["symphonia-all"] }
+lindera = { version = "6.0", features = ["embed-unidic"] }

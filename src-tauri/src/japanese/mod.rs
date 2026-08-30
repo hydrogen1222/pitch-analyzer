@@ -11,6 +11,8 @@
 pub mod mora;
 pub mod phoneme;
 pub mod reading;
+pub mod unidic;
 
 pub use mora::parse_kana_moras;
 pub use reading::{JapaneseReadingProvider, KanaOnlyProvider};
+pub use unidic::LinderaUnidicProvider;
