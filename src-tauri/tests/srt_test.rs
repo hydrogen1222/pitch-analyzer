@@ -45,8 +45,14 @@ fn test_export_srt_with_lyrics() {
     let content = std::fs::read_to_string(&out).unwrap();
     println!("SRT content:\n{}", content);
     assert!(content.contains("-->"));
-    assert!(content.contains("[C4]")); // MIDI 60 = C4
+    assert!(content.contains("C4")); // MIDI 60 = C4 (音符行)
     assert!(content.contains("Hello"));
+    assert!(content.contains("再见世界"));
+    assert_eq!(
+        content.matches("--> ").count(),
+        2,
+        "one cue per source line"
+    );
 }
 
 #[test]
@@ -107,7 +113,7 @@ fn test_srt_uses_primary_note_not_first() {
     let content = std::fs::read_to_string(&out).unwrap();
     println!("SRT primary content:\n{}", content);
     assert!(
-        content.contains("[C4]"),
+        content.contains("C4"),
         "expected C4 as primary, got:\n{}",
         content
     );

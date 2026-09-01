@@ -240,10 +240,40 @@ pub fn apply_reading_overrides(
     overrides: &[ReadingOverride],
     text: &str,
 ) {
+    fn fragment_span(char_start: usize, char_end: usize, text: &str) -> ReadingSpan {
+        let surface: String = text
+            .chars()
+            .skip(char_start)
+            .take(char_end.saturating_sub(char_start))
+            .collect();
+        let is_kana = surface
+            .chars()
+            .all(|c| mora::is_kana_char(c) || c == '\u{30FC}');
+        let (reading, pronunciation, confidence) = if is_kana {
+            (surface.clone(), surface.clone(), 1.0)
+        } else {
+            // A partial dictionary morpheme no longer has a trustworthy
+            // reading. Keep its display text, but do not invent a mapping.
+            (String::new(), String::new(), 0.0)
+        };
+        ReadingSpan {
+            surface,
+            reading,
+            pronunciation,
+            char_start,
+            char_end,
+            display_start: char_start,
+            display_end: char_end,
+            mora_start: 0,
+            mora_end: 0,
+            confidence,
+        }
+    }
+
     // A Ruby span is the language truth even if the dictionary segmented the
-    // surface into several morphemes. Replace the complete intersecting range
-    // with one span so `二人(ふたり)` can never duplicate all three moras onto
-    // both glyphs.
+    // surface into several morphemes. Replace only the annotated character
+    // range. Kana before/after that range must survive: for example, replacing
+    // `悲` in UniDic's `悲しい` span must not silently discard `しい`.
     for ov in overrides {
         let first = spans
             .iter()
@@ -260,23 +290,26 @@ pub fn apply_reading_overrides(
             .skip(char_start)
             .take(char_end.saturating_sub(char_start))
             .collect();
-        let display_start = spans[first].display_start.min(char_start);
-        let display_end = spans[last].display_end.max(char_end);
-        spans.splice(
-            first..=last,
-            [ReadingSpan {
-                surface,
-                pronunciation: ov.reading.clone(),
-                reading: ov.reading.clone(),
-                char_start,
-                char_end,
-                display_start,
-                display_end,
-                mora_start: 0,
-                mora_end: 0,
-                confidence: 1.0,
-            }],
-        );
+        let mut replacements = Vec::with_capacity(3);
+        if spans[first].char_start < char_start {
+            replacements.push(fragment_span(spans[first].char_start, char_start, text));
+        }
+        replacements.push(ReadingSpan {
+            surface,
+            pronunciation: ov.reading.clone(),
+            reading: ov.reading.clone(),
+            char_start,
+            char_end,
+            display_start: char_start,
+            display_end: char_end,
+            mora_start: 0,
+            mora_end: 0,
+            confidence: 1.0,
+        });
+        if char_end < spans[last].char_end {
+            replacements.push(fragment_span(char_end, spans[last].char_end, text));
+        }
+        spans.splice(first..=last, replacements);
     }
     // 顺序重算 mora 区间: 假名 span 按读音解析, 非假名 span 0 拍
     let mut offset = 0usize;

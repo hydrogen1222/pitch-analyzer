@@ -113,10 +113,11 @@ fn is_y_small_raw(c: char) -> bool {
     )
 }
 
-/// 单个普通假名 → 辅音 + 母音
+/// 单个普通假名 → 辅音 + 母音; 元音直用假名 (あ行) 只有母音
 fn single_kana_phonemes(c: char) -> Vec<String> {
     match (consonant_of(c), vowel_of(c)) {
         (Some(cons), Some(v)) => vec![cons.to_string(), v.to_string()],
+        (None, Some(v)) => vec![v.to_string()],
         _ => vec![],
     }
 }

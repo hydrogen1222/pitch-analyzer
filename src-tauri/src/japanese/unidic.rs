@@ -78,6 +78,9 @@ impl JapaneseReadingProvider for LinderaUnidicProvider {
 
         for token in &mut tokens {
             let surface = token.surface.to_string();
+            let surface_is_kana = surface
+                .chars()
+                .all(|c| mora::is_kana_char(c) || c == '\u{30FC}');
             let byte_start = token.byte_start;
             let byte_end = token.byte_end;
             let char_start = char_of_byte.get(byte_start).copied().unwrap_or(0);
@@ -97,20 +100,22 @@ impl JapaneseReadingProvider for LinderaUnidicProvider {
                 .copied()
                 .unwrap_or("*");
 
-            let pronunciation_str = if raw_pron != "*" && !raw_pron.is_empty() {
+            // UniDic can expose the lemma reading for inflected kana tokens
+            // (`し` -> `する`, `て` -> `てる`). For an all-kana surface the
+            // visible text itself is the exact pronunciation and must win.
+            let pronunciation_str = if surface_is_kana {
+                katakana_to_hiragana(&surface)
+            } else if raw_pron != "*" && !raw_pron.is_empty() {
                 katakana_to_hiragana(raw_pron)
             } else if raw_read != "*" && !raw_read.is_empty() {
                 katakana_to_hiragana(raw_read)
-            } else if surface
-                .chars()
-                .all(|c| mora::is_kana_char(c) || c == '\u{30FC}')
-            {
-                surface.clone()
             } else {
                 String::new()
             };
 
-            let reading_str = if raw_read != "*" && !raw_read.is_empty() {
+            let reading_str = if surface_is_kana {
+                katakana_to_hiragana(&surface)
+            } else if raw_read != "*" && !raw_read.is_empty() {
                 katakana_to_hiragana(raw_read)
             } else if !pronunciation_str.is_empty() {
                 pronunciation_str.clone()
@@ -118,13 +123,10 @@ impl JapaneseReadingProvider for LinderaUnidicProvider {
                 String::new()
             };
 
-            let confidence = if !pronunciation_str.is_empty() {
-                0.95
-            } else if surface
-                .chars()
-                .all(|c| mora::is_kana_char(c) || c == '\u{30FC}')
-            {
+            let confidence = if surface_is_kana {
                 1.0
+            } else if !pronunciation_str.is_empty() {
+                0.95
             } else {
                 0.0
             };

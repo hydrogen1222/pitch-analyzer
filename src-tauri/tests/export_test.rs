@@ -1,4 +1,4 @@
-// ASS / SRT 导出测试 (§: ASS 字幕导出, SRT 使用 primary_note)
+// ASS / SRT 导出测试：每句源歌词一行，转音使用 hyphen 连接。
 
 use pitch_analyzer_tauri_lib::export::ass::export_ass;
 use pitch_analyzer_tauri_lib::export::srt::export_srt;
@@ -105,6 +105,65 @@ fn test_export_ass_uses_primary_not_first() {
 }
 
 #[test]
+fn test_export_ass_keeps_one_source_line_and_uses_hyphen_for_turns() {
+    let mut lines = parse_lrc("[00:01.00]你好世界", Some(10.0));
+    distribute_token_times(&mut lines);
+    attach_primary(&mut lines);
+
+    let turn = vec![
+        PitchNote {
+            start_time: 1.0,
+            end_time: 1.2,
+            median_midi: 62.0, // D4
+            mean_midi: 62.0,
+            rounded_midi: 62,
+            confidence_mean: 0.9,
+            point_count: 20,
+        },
+        PitchNote {
+            start_time: 1.2,
+            end_time: 1.5,
+            median_midi: 60.0, // C4
+            mean_midi: 60.0,
+            rounded_midi: 60,
+            confidence_mean: 0.9,
+            point_count: 30,
+        },
+    ];
+    lines[0].tokens[0].pitch_notes = turn;
+
+    let out = std::env::temp_dir().join("test_export_ass_turn.ass");
+    export_ass(&lines, &out, 40, 28).unwrap();
+    let content = std::fs::read_to_string(&out).unwrap();
+    let lyric_dialogues = content
+        .lines()
+        .filter(|line| line.contains(",Lyric,"))
+        .count();
+
+    assert_eq!(lyric_dialogues, 1, "the source lyric must stay one ASS row");
+    assert!(
+        content.contains("D4-C4"),
+        "turn notes must use hyphen:\n{}",
+        content
+    );
+    assert!(
+        !content.contains("→"),
+        "export must not contain arrow connectors"
+    );
+
+    let srt_out = std::env::temp_dir().join("test_export_srt_turn.srt");
+    export_srt(&track(), &lines, &srt_out).unwrap();
+    let srt_content = std::fs::read_to_string(&srt_out).unwrap();
+    assert_eq!(
+        srt_content.matches("--> ").count(),
+        1,
+        "SRT must keep the source lyric as one cue"
+    );
+    assert!(srt_content.contains("D4-C4"));
+    assert!(srt_content.contains("\n你好世界\n"));
+}
+
+#[test]
 fn test_export_ass_no_lyrics_error() {
     let out = std::env::temp_dir().join("test_empty.ass");
     let err = export_ass(&[], &out, 40, 28).unwrap_err();
@@ -150,9 +209,71 @@ fn test_export_srt_primary_fallback() {
     export_srt(&track, &lines, &out).unwrap();
     let content = std::fs::read_to_string(&out).unwrap();
     assert!(
-        content.contains("[C4]"),
+        content.contains("C4"),
         "SRT fallback must choose C4:\n{}",
         content
     );
     assert!(!content.contains("[F5]"));
+}
+
+#[test]
+fn ruby_lyrics_export_pitch_over_kana_and_keep_source_kanji_line() {
+    let mut lines = parse_lrc(
+        "[00:00.000]冷(つめ)たく微笑(ほほえ)んだ[00:02.000]",
+        Some(2.0),
+    );
+    distribute_token_times(&mut lines);
+    let group_count = lines[0].reading_display_groups.len();
+    for (index, group) in lines[0].reading_display_groups.iter_mut().enumerate() {
+        let start = index as f32 * 2.0 / group_count as f32;
+        let end = (index + 1) as f32 * 2.0 / group_count as f32;
+        group.start_time = Some(start);
+        group.end_time = Some(end);
+        group.primary_note = Some(PitchNote {
+            start_time: start,
+            end_time: end,
+            median_midi: 60.0,
+            mean_midi: 60.0,
+            rounded_midi: 60,
+            confidence_mean: 0.9,
+            point_count: 10,
+        });
+    }
+
+    let srt_path = std::env::temp_dir().join("test_ruby_kana_pitch.srt");
+    export_srt(&track(), &lines, &srt_path).unwrap();
+    let srt = std::fs::read_to_string(&srt_path).unwrap();
+    assert!(
+        srt.contains("つめたくほほえんだ"),
+        "kana row missing:\n{srt}"
+    );
+    assert!(srt.contains("冷たく微笑んだ"), "source row missing:\n{srt}");
+    let kana_pos = srt.find("つめたくほほえんだ").unwrap();
+    let source_pos = srt.find("冷たく微笑んだ").unwrap();
+    assert!(
+        kana_pos < source_pos,
+        "pitch must be presented over the kana row"
+    );
+
+    let ass_path = std::env::temp_dir().join("test_ruby_kana_pitch.ass");
+    export_ass(&lines, &ass_path, 40, 28).unwrap();
+    let ass = std::fs::read_to_string(&ass_path).unwrap();
+    assert!(ass.contains("Style: Reading,"));
+    assert!(ass.contains(",Reading,"));
+    assert!(ass.contains("つ"));
+    let lyric_line = ass
+        .lines()
+        .find(|line| line.contains(",Lyric,"))
+        .expect("source lyric dialogue");
+    for glyph in ['冷', 'た', 'く', '微', '笑', 'ん', 'だ'] {
+        assert!(
+            lyric_line.contains(glyph),
+            "source glyph {glyph} missing: {lyric_line}"
+        );
+    }
+    assert_eq!(
+        ass.lines().filter(|line| line.contains(",Lyric,")).count(),
+        1,
+        "source kanji lyric must remain one row"
+    );
 }

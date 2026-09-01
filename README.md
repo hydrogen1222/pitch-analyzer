@@ -61,7 +61,7 @@
 **Pitch Analyzer** is a friendly desktop software that automatically extracts and visualizes the notes and pitch curve of your singing. Using state-of-the-art **FCPE** deep learning AI, it listens to your raw vocal recording, traces the frequency, snaps the pitch to musical notes, and helps you easily align lyrics to build karaoke subtitles.
 
 If you are a **singer**, **content creator**, or **vocal tuner**, this is your go-to companion:
-> Import your audio ➜ Watch notes appear on a beautiful piano roll ➜ Import lyrics ➜ Play & export synced CJK/English subtitles (SRT) with notes.
+> Import your audio ➜ Watch notes appear on a beautiful piano roll ➜ Import lyrics ➜ Play & export synced CJK/English subtitles (SRT/ASS) with notes.
 
 ---
 
@@ -69,11 +69,11 @@ If you are a **singer**, **content creator**, or **vocal tuner**, this is your g
 
 - 🔬 **Highly Accurate AI Pitch Tracking** — Powered by the FCPE model via ONNX Runtime. Perfect even on quiet/noisy acapella tracks.
 - 🎼 **Canonical Musical Notes** — With the complete GAME ONNX bundle, note events come from the real GAME inference pipeline. Missing models or inference errors are explicitly labeled `LegacyFcpeTracker`.
-- 📝 **Ruby Japanese Lyrics** — Enhanced LRC/TXT accepts `漢字(かな)` ruby, keeps translation lines unchanged, and uses one acoustic display group for multi-glyph readings such as `二人(ふたり)`.
+- 📝 **Ruby Japanese Lyrics** — Enhanced LRC/TXT accepts `漢字(かな)` ruby, keeps translation lines unchanged, and splits explicit readings into mora-level kana pitch slots. Notes are shown above the kana row while the original kanji lyric remains one intact source line.
 - 🎚️ **Evidence-aware Note Display** — Compact, Musical Detail, and Debug Raw modes separate stable FCPE-supported notes from uncertain GAME candidates; unsupported notes remain explainable in the debug overlay.
 - 🎹 **Visual Piano Roll** — A scrolling view showing your pitch curve aligned over piano keys with a real-time playback cursor.
-- 🎤 **Karaoke Lyrics Sync** — Import LRC (with/without translations) or plain text TXT. Alignment priority is Enhanced LRC, optional real MMS-FA, mora-aware acoustic DP, then weighted fallback.
-- 📋 **One-Click Subtitle Export (SRT)** — Generates subtitle tracks with note annotations (e.g. `Hello [C4]`) for video editing.
+- 🎤 **Karaoke Lyrics Sync** — Import LRC (with/without translations) or TXT. Timestamped TXT is detected automatically and follows the same alignment pipeline as LRC; plain text TXT remains supported. Alignment priority is Enhanced LRC, optional real MMS-FA, mora-aware acoustic DP, then weighted fallback.
+- 📋 **One-Click Subtitle Export (SRT/ASS)** — For ruby lyrics, SRT and ASS keep separate pitch, kana, and intact source-kanji rows; translations remain on their own row. Musical note transitions use hyphens such as `G4-A4`.
 - 💾 **Project Save/Load** — Save your workspace into a single JSON project file and reopen it anytime.
 
 <p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
@@ -125,7 +125,7 @@ MMS-FA is opt-in because it requires a Python environment with `torch` and `torc
 ## 🎮 Step-by-Step Tutorial
 
 ```
-1. Import Audio ➜ 2. Fine-tune Pitch ➜ 3. Load Lyrics ➜ 4. Preview Playback ➜ 5. Export SRT
+1. Import Audio ➜ 2. Fine-tune Pitch ➜ 3. Load Lyrics ➜ 4. Preview Playback ➜ 5. Export SRT/ASS
 ```
 
 1. **Import Audio**: Click the blue **"📂 Import Audio & Analyze"** button. The app will decode and resample your file, run the AI model, and draw the green pitch curve on the piano roll. An analysis progress bar at the bottom will keep you updated.
@@ -133,9 +133,9 @@ MMS-FA is opt-in because it requires a Python environment with `torch` and `torc
    - **Pop**: Good for standard pop/rock vocal tracks.
    - **Folk**: Good for solo acoustic or clean acapellas.
    - **Classical**: Snaps pitches to exact piano notes (Quantized).
-3. **Add Lyrics**: Click **"🎵 Import LRC"** (recommended for synced lyrics) or **"📝 Import TXT"**. The words will align with the notes. Active syllables will glow green as they play! Japanese ruby may be written as `漢字(かな)`; choose a pitch display mode for compact names, musical detail, or evidence diagnostics.
+3. **Add Lyrics**: Click **"🎵 Import LRC"** or **"📝 Import TXT"**. Timestamped TXT is detected automatically. Japanese ruby may be written as `漢字(かな)`; pitch labels align with each kana mora, while the original kanji sentence stays on one source row. Choose a pitch display mode for compact names, musical detail, or evidence diagnostics.
 4. **Playback**: Press the play (▶) button. You can slide the progress bar or change volume.
-5. **Export Subtitles**: Click **"📋 Export SRT"** to save your annotated subtitles. Drag the SRT file into Premiere, CapCut, or DaVinci Resolve!
+5. **Export Subtitles**: Click **"📋 Export SRT"** for one-cue-per-lyric subtitles, or **"📋 Export ASS"** for positioned pitch labels above the lyrics. ASS is the format closest to the karaoke layout shown in the examples.
 
 <p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 
@@ -202,18 +202,18 @@ pnpm tauri build
 
 基于先进的 **FCPE** 深度学习模型，它能智能识别清唱人声，提取频率并自动对齐 MIDI 音符，最终协助您完成精细化的卡拉OK歌词标注与字幕制作。
 
-> 导入音频 ➜ 钢琴卷帘窗实时显示音轨 ➜ 导入歌词 ➜ 随心播放并一键导出带音高标注的双语字幕（SRT）。
+> 导入音频 ➜ 钢琴卷帘窗实时显示音轨 ➜ 导入歌词 ➜ 随心播放并一键导出带音高标注的双语字幕（SRT/ASS）。
 
 ---
 
 ## ✨ 核心功能
 
 - 🔬 **极准的 AI 音高跟踪** — 基于 FCPE 模型与 ONNX Runtime 硬件加速，干净人声和略带底噪的清唱皆可精准感应。
-- 🈶 **日语注音与多字一音** — 支持 `漢字(かな)` 注音，显示坐标以去注音后的文字为准；如 `二人(ふたり)` 作为一个声学显示组，不会重复绑定 mora 或音符。
+- 🈶 **日语注音与逐假名音高** — 支持 `漢字(かな)` 注音，并将显式读音拆成逐 mora 的假名音高槽位；音高显示在假名行上方，汉字源歌词仍保持完整的一整行，翻译单独保留。
 - 🎚️ **高可信音符显示** — Compact、Musical Detail、Debug Raw 三种模式分别面向演唱提示、音乐细节和证据审计；GAME 候选会与 FCPE 音高证据融合，低可信结果明确解释并从生产音符中剔除。
 - 🎹 **直观的钢琴卷帘窗** — 绿色的音高曲线在钢琴键背景上一目了然，带播放光标指示。
-- 🎤 **卡拉OK 歌词自动对齐** — 导入 LRC（支持双语合并）或 TXT 文本，程序自动分词并对齐，播放时唱到的字会变成**青色并微微放大发光**。
-- 📋 **一键导出 SRT 字幕** — 导出带音名标注（如 `你好 [C4]`）的字幕文件，方便导入各大视频剪辑软件。
+- 🎤 **卡拉OK 歌词自动对齐** — 导入 LRC（支持双语合并）或 TXT；带时间戳的 TXT 会自动按 LRC 流程解析和对齐，普通纯文本 TXT 也继续支持。播放时当前假名会变成**青色并微微放大发光**。
+- 📋 **一键导出 SRT/ASS 字幕** — 注音歌词按“音高行、假名行、完整汉字源歌词行”导出，翻译另起一行；音乐细节中的转音使用 `G4-A4` 这种连字符形式。
 - 💾 **项目工程存取** — 支持将所有分析参数和对齐歌词保存为 JSON 工程文件，下次直接打开。
 
 <p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
@@ -265,7 +265,7 @@ MMS-FA 是可选后端，需要安装含 `torch` 和 `torchaudio` 的 Python 环
 ## 🎮 傻瓜式使用教程
 
 ```
-导入人声音频 ➜ 侧边栏微调音高 ➜ 导入歌词对照 ➜ 随心试听 ➜ 导出带音高字幕
+导入人声音频 ➜ 侧边栏微调音高 ➜ 导入歌词对照 ➜ 随心试听 ➜ 导出 SRT/ASS 带音高字幕
 ```
 
 1. **导入音频**：点击左侧蓝色的 **"📂 导入音频并分析"** 按钮，选择人声录音。侧边栏底部会出现进度条，显示解码、推理等进度。分析完成后，钢琴卷帘窗上会出现绿色的音高曲线。
@@ -273,9 +273,9 @@ MMS-FA 是可选后端，需要安装含 `torch` 和 `torchaudio` 的 Python 环
    - **流行**：适配绝大多数流行与摇滚人声。
    - **民谣**：适配比较干净的民谣清唱、弹唱人声。
    - **古典**：适配美声或合唱，音高线会自动吸附到钢琴键上。
-3. **导入歌词**：点击 **"🎵 导入 LRC"**（带时间戳的歌词文件）或 **"📝 导入 TXT"**（纯文本）。歌词会显示在顶部面板，播放时唱到的字会变成**青色并微微放大发光**。日语注音写作 `漢字(かな)`；右侧音符显示模式可切换紧凑提示、音乐细节或原始证据调试信息。
+3. **导入歌词**：点击 **"🎵 导入 LRC"** 或 **"📝 导入 TXT"**。TXT 可直接使用《岡村孝子 - ドラマ》这种带时间戳、翻译和 `漢字(かな)` 注音的格式，程序会自动识别。音高逐个对齐在假名上方，汉字源歌词保持一整行；右侧可切换紧凑提示、音乐细节或原始证据调试信息。
 4. **播放试听**：点击下方的播放按钮 (▶) 即可试听。拖拽滚动条可以调节音轨进度，拖动音量条调节音量大小。
-5. **导出成果**：点击 **"📋 导出 SRT"**，可直接将带音名字幕保存到本地。导入剪辑软件（如剪映、PR、FCP）即可制作出带有音符提示的高档卡拉OK字幕！
+5. **导出成果**：点击 **"📋 导出 SRT"** 可保存每句一块的双行字幕；若要得到音符位于歌词上方的示例效果，请点击 **"📋 导出 ASS"**，再用支持 ASS 的播放器或视频工具烧录。
 
 <p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 

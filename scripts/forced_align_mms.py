@@ -71,7 +71,22 @@ def main() -> None:
 
     try:
         bundle = torchaudio.pipelines.MMS_FA
-        waveform, sample_rate = torchaudio.load(str(audio_path))
+        try:
+            waveform, sample_rate = torchaudio.load(str(audio_path))
+        except Exception as load_error:
+            # torchaudio >= 2.9 delegates file IO to torchcodec which is often
+            # unavailable on CPU-only envs; soundfile reads the same formats.
+            try:
+                import soundfile as sf_module
+
+                data, sample_rate = sf_module.read(
+                    str(audio_path), dtype="float32", always_2d=True
+                )
+                waveform = torch.from_numpy(data.T.copy())  # (channels, time)
+            except Exception as sf_error:
+                _error(
+                    f"audio load failed: torchaudio={load_error} soundfile={sf_error}"
+                )
         waveform = waveform.mean(dim=0, keepdim=True)
         if sample_rate != bundle.sample_rate:
             waveform = torchaudio.functional.resample(

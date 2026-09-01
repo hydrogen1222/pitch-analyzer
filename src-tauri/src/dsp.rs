@@ -1,7 +1,8 @@
 // DSP 后处理: 复刻 analyzer.py 的完整管线
 //
 // stabilize_vocal_midi → apply_median_midi → apply_savgol_midi → quantize
-// 其中 stabilize = confidence_mask + remove_short_pitch_islands + apply_hampel
+// 其中 stabilize = confidence_mask + relative_energy_gate + short_return_jitter
+//                + remove_short_pitch_islands + apply_hampel
 
 /// f0 → MIDI: midi = 69 + 12 * log2(f0/440), f0 <= 0 → NaN
 pub fn f0_to_midi(f0: &[f32]) -> Vec<f32> {
@@ -75,6 +76,11 @@ pub fn post_process(
         midi = apply_savgol_midi(&midi, w);
     }
 
+    // Savitzky-Golay 在音符边缘可能产生很小的单帧回摆。用同一套保守的
+    // “短暂偏离后回到原中心”判定做最终收口，避免平滑器重新制造视觉抖动。
+    suppress_short_return_jitter(&mut midi);
+    suppress_single_frame_zigzags(&mut midi);
+
     // 6. quantize
     if quantize {
         for m in midi.iter_mut() {
@@ -110,6 +116,14 @@ fn stabilize_vocal_midi(
             out[i] = f32::NAN;
         }
     }
+    // FCPE may lock onto a breath/noise component for only 10-20ms even when
+    // its confidence clears the absolute thresholds. Repair only when that
+    // frame is markedly quieter than its local voiced context and the pitch
+    // on both sides agrees; real note transitions therefore remain intact.
+    repair_relative_low_energy_spikes(&mut out, rms);
+    // 继续吸收音量正常但只有 10-30ms 的亚半音往返。这里只处理“短暂偏离后
+    // 回到同一稳定中心”的小幅 excursion；持续换音及 >= 1 半音的倚音不动。
+    suppress_short_return_jitter(&mut out);
     // 孤立短 voiced 段: 静音/换气间隙里 1-2 帧的发声毛刺 (置信度略过阈值即可产生),
     // median/hampel 对孤岛无能为力 (nanmedian 有值就返回), 必须整段丢弃
     drop_short_voiced_segments(&mut out, MIN_VOICED_SEGMENT_FRAMES);
@@ -157,6 +171,201 @@ const ISLAND_MIN_FRAMES: usize = 5;
 const MIN_VOICED_SEGMENT_FRAMES: usize = 3;
 /// 边界泛音误差 (八度/十二度/双八度) 允许的最长修正帧数 (150ms)
 const ISLAND_HARMONIC_MAX_FRAMES: usize = 15;
+/// 相对能量比较的单侧邻域 (60ms)
+const RELATIVE_RMS_HALF_WINDOW: usize = 6;
+/// 比局部中位 RMS 低约 5dB 即视为显著偏低
+const RELATIVE_RMS_RATIO: f32 = 0.55;
+/// 只修复 10-30ms 的低能量异常，不抹除持续弱音或明确转音
+const RELATIVE_RMS_MAX_FRAMES: usize = 3;
+/// 前后主音必须基本一致，才允许用其插值替代异常帧
+const RELATIVE_RMS_NEIGHBOR_SEMITONES: f32 = 0.75;
+/// 25 cents 起纳入低能量毛刺修复
+const RELATIVE_RMS_MIN_PITCH_DEVIATION: f32 = 0.25;
+
+/// 亚半音短往返的单侧稳定上下文 (40ms)
+const SHORT_RETURN_CONTEXT_FRAMES: usize = 4;
+/// 最长吸收 30ms，超过则视为有意的音高运动
+const SHORT_RETURN_MAX_FRAMES: usize = 3;
+/// 两侧稳定中心必须相差不超过 35 cents
+const SHORT_RETURN_CENTER_TOLERANCE: f32 = 0.35;
+/// 上下文自身必须足够平稳
+const SHORT_RETURN_CONTEXT_SPREAD: f32 = 0.35;
+/// 18 cents 以下不必追逐，形成显示所需的迟滞区
+const SHORT_RETURN_MIN_DEVIATION: f32 = 0.18;
+/// 只吸收轻微抖动；接近或超过一个半音的短音仍保留
+const SHORT_RETURN_MAX_DEVIATION: f32 = 0.70;
+/// 最终单帧规则允许的 A/C 邻点差异
+const SINGLE_FRAME_NEIGHBOR_TOLERANCE: f32 = 0.25;
+/// ≥1 半音仍按明确短音保留
+const SINGLE_FRAME_MAX_DEVIATION: f32 = 0.95;
+
+#[allow(clippy::needless_range_loop)] // DSP 逐帧索引是算法本体
+fn repair_relative_low_energy_spikes(midi: &mut [f32], rms: &[f32]) {
+    if midi.len() < 3 || rms.len() < midi.len() {
+        return;
+    }
+
+    let mut low_energy = vec![false; midi.len()];
+    for i in 0..midi.len() {
+        if midi[i].is_nan() || !rms[i].is_finite() {
+            continue;
+        }
+        let lo = i.saturating_sub(RELATIVE_RMS_HALF_WINDOW);
+        let hi = (i + RELATIVE_RMS_HALF_WINDOW + 1).min(midi.len());
+        let local_rms: Vec<f32> = (lo..hi)
+            .filter(|&j| j != i && !midi[j].is_nan() && rms[j].is_finite() && rms[j] > 0.0)
+            .map(|j| rms[j])
+            .collect();
+        if local_rms.len() < 4 {
+            continue;
+        }
+        let local_median = nanmedian(&local_rms);
+        low_energy[i] = local_median > 0.0 && rms[i] < local_median * RELATIVE_RMS_RATIO;
+    }
+
+    let mut start = 0usize;
+    while start < low_energy.len() {
+        if !low_energy[start] {
+            start += 1;
+            continue;
+        }
+        let mut end = start;
+        while end + 1 < low_energy.len() && low_energy[end + 1] {
+            end += 1;
+        }
+        let run_len = end - start + 1;
+        if run_len <= RELATIVE_RMS_MAX_FRAMES && start > 0 && end + 1 < midi.len() {
+            let left = midi[start - 1];
+            let right = midi[end + 1];
+            if !left.is_nan()
+                && !right.is_nan()
+                && (left - right).abs() <= RELATIVE_RMS_NEIGHBOR_SEMITONES
+            {
+                let max_deviation = (start..=end)
+                    .map(|i| (midi[i] - (left + right) * 0.5).abs())
+                    .fold(0.0f32, f32::max);
+                if max_deviation >= RELATIVE_RMS_MIN_PITCH_DEVIATION {
+                    for offset in 0..run_len {
+                        let t = (offset + 1) as f32 / (run_len + 1) as f32;
+                        midi[start + offset] = left + t * (right - left);
+                    }
+                }
+            }
+        }
+        start = end + 1;
+    }
+}
+
+/// 修复稳定音高中的 10-30ms 小幅往返。
+///
+/// 与中值滤波不同，这里要求偏离段前后各有 40ms 的稳定上下文、两侧中心一致，
+/// 且紧邻边界已经回到各自中心。因此不会把一个持续的新音误识别为短毛刺。
+fn suppress_short_return_jitter(midi: &mut [f32]) {
+    if midi.len() < SHORT_RETURN_CONTEXT_FRAMES * 2 + 1 {
+        return;
+    }
+
+    for (seg_start, seg_end) in iter_voiced_segments(midi) {
+        if seg_end - seg_start + 1 < SHORT_RETURN_CONTEXT_FRAMES * 2 + 1 {
+            continue;
+        }
+
+        let mut start = seg_start + SHORT_RETURN_CONTEXT_FRAMES;
+        let last_start = seg_end.saturating_sub(SHORT_RETURN_CONTEXT_FRAMES);
+        while start <= last_start {
+            let mut matched: Option<(usize, f32, f32)> = None;
+
+            // 先尝试较长的偏离段，避免只修掉一个 30ms hump 的中间一帧。
+            for run_len in (1..=SHORT_RETURN_MAX_FRAMES).rev() {
+                let end = start + run_len - 1;
+                if end + SHORT_RETURN_CONTEXT_FRAMES > seg_end {
+                    continue;
+                }
+
+                let left = &midi[start - SHORT_RETURN_CONTEXT_FRAMES..start];
+                let right = &midi[end + 1..=end + SHORT_RETURN_CONTEXT_FRAMES];
+                let left_center = nanmedian(left);
+                let right_center = nanmedian(right);
+                if (left_center - right_center).abs() > SHORT_RETURN_CENTER_TOLERANCE {
+                    continue;
+                }
+                if left
+                    .iter()
+                    .any(|value| (*value - left_center).abs() > SHORT_RETURN_CONTEXT_SPREAD)
+                    || right
+                        .iter()
+                        .any(|value| (*value - right_center).abs() > SHORT_RETURN_CONTEXT_SPREAD)
+                {
+                    continue;
+                }
+
+                // 候选必须完整包住 excursion；若紧邻帧仍在偏离，就说明它在持续。
+                if (midi[start - 1] - left_center).abs() > SHORT_RETURN_MIN_DEVIATION
+                    || (midi[end + 1] - right_center).abs() > SHORT_RETURN_MIN_DEVIATION
+                {
+                    continue;
+                }
+
+                let baseline = (left_center + right_center) * 0.5;
+                let deviations: Vec<f32> = midi[start..=end]
+                    .iter()
+                    .map(|value| *value - baseline)
+                    .collect();
+                let min_deviation = deviations
+                    .iter()
+                    .map(|value| value.abs())
+                    .fold(f32::INFINITY, f32::min);
+                let max_deviation = deviations
+                    .iter()
+                    .map(|value| value.abs())
+                    .fold(0.0f32, f32::max);
+                let one_sided = deviations
+                    .iter()
+                    .all(|value| value.signum() == deviations[0].signum());
+                if one_sided
+                    && min_deviation >= SHORT_RETURN_MIN_DEVIATION
+                    && max_deviation <= SHORT_RETURN_MAX_DEVIATION
+                {
+                    matched = Some((run_len, left_center, right_center));
+                    break;
+                }
+            }
+
+            if let Some((run_len, left_center, right_center)) = matched {
+                for offset in 0..run_len {
+                    let t = (offset + 1) as f32 / (run_len + 1) as f32;
+                    midi[start + offset] = left_center + t * (right_center - left_center);
+                }
+                start += run_len;
+            } else {
+                start += 1;
+            }
+        }
+    }
+}
+
+/// 最终滤波器只修复 A-B-C 三帧中的单帧尖点。
+/// A/C 必须已经回到同一音高，B 也必须小于一个半音；这能覆盖长上下文不稳定时
+/// 仍会被肉眼看到的 10ms 锯齿，同时保留明确的半音短音和持续音高变化。
+fn suppress_single_frame_zigzags(midi: &mut [f32]) {
+    if midi.len() < 3 {
+        return;
+    }
+    let source = midi.to_vec();
+    for i in 1..source.len() - 1 {
+        let (left, current, right) = (source[i - 1], source[i], source[i + 1]);
+        if left.is_nan() || current.is_nan() || right.is_nan() {
+            continue;
+        }
+        let center = (left + right) * 0.5;
+        let deviation = (current - center).abs();
+        if (left - right).abs() <= SINGLE_FRAME_NEIGHBOR_TOLERANCE
+            && (SHORT_RETURN_MIN_DEVIATION..=SINGLE_FRAME_MAX_DEVIATION).contains(&deviation)
+        {
+            midi[i] = center;
+        }
+    }
+}
 
 #[allow(clippy::needless_range_loop)] // DSP 逐帧索引是算法本体
 fn remove_short_pitch_islands(
@@ -581,6 +790,106 @@ mod tests {
         assert!(
             !out2[10].is_nan() && !out2[12].is_nan(),
             "3-frame segment must be kept"
+        );
+    }
+
+    #[test]
+    fn test_relative_low_energy_single_frame_jitter_is_repaired() {
+        let mut midis = midis_from(&[(60.0, 8), (60.7, 1), (60.0, 8)]);
+        let mut rms = vec![0.1; midis.len()];
+        rms[8] = 0.02;
+        repair_relative_low_energy_spikes(&mut midis, &rms);
+        assert!(
+            (midis[8] - 60.0).abs() < 0.05,
+            "low-energy 10ms jitter should follow its audible neighbors: {}",
+            midis[8]
+        );
+    }
+
+    #[test]
+    fn test_equal_energy_short_note_is_preserved() {
+        let mut midis = midis_from(&[(60.0, 8), (60.7, 1), (60.0, 8)]);
+        let rms = vec![0.1; midis.len()];
+        repair_relative_low_energy_spikes(&mut midis, &rms);
+        assert_eq!(midis[8], 60.7, "audible short pitch movement must remain");
+    }
+
+    #[test]
+    fn test_sustained_soft_note_is_not_treated_as_a_spike() {
+        let mut midis = midis_from(&[(60.0, 8), (62.0, 8), (60.0, 8)]);
+        let mut rms = vec![0.1; midis.len()];
+        rms[8..16].fill(0.02);
+        repair_relative_low_energy_spikes(&mut midis, &rms);
+        assert!(
+            midis[8..16].iter().all(|midi| (*midi - 62.0).abs() < 0.01),
+            "a sustained soft note is not a 10-20ms noise spike"
+        );
+    }
+
+    #[test]
+    fn test_low_energy_transition_is_preserved_when_neighbors_disagree() {
+        let mut midis = midis_from(&[(60.0, 8), (61.0, 1), (62.0, 8)]);
+        let mut rms = vec![0.1; midis.len()];
+        rms[8] = 0.02;
+        repair_relative_low_energy_spikes(&mut midis, &rms);
+        assert_eq!(midis[8], 61.0, "real transition must not be flattened");
+    }
+
+    #[test]
+    fn test_single_frame_subsemitone_return_jitter_is_suppressed() {
+        let mut midis = midis_from(&[(60.0, 8), (60.32, 1), (60.0, 8)]);
+        suppress_short_return_jitter(&mut midis);
+        assert!(
+            (midis[8] - 60.0).abs() < 0.01,
+            "10ms return jitter should be absorbed: {}",
+            midis[8]
+        );
+    }
+
+    #[test]
+    fn test_three_frame_subsemitone_return_jitter_is_suppressed() {
+        let mut midis = midis_from(&[(60.0, 8), (60.52, 3), (60.0, 8)]);
+        suppress_short_return_jitter(&mut midis);
+        assert!(
+            midis[8..11].iter().all(|midi| (*midi - 60.0).abs() < 0.01),
+            "30ms return jitter should be absorbed: {:?}",
+            &midis[8..11]
+        );
+    }
+
+    #[test]
+    fn test_sustained_or_semitone_pitch_motion_is_preserved() {
+        let mut sustained = midis_from(&[(60.0, 8), (60.52, 4), (60.0, 8)]);
+        suppress_short_return_jitter(&mut sustained);
+        assert!(
+            sustained[8..12]
+                .iter()
+                .all(|midi| (*midi - 60.52).abs() < 0.01),
+            "40ms sustained motion must not be partially erased: {:?}",
+            &sustained[8..12]
+        );
+
+        let mut semitone = midis_from(&[(60.0, 8), (61.0, 2), (60.0, 8)]);
+        suppress_short_return_jitter(&mut semitone);
+        assert!(
+            semitone[8..10]
+                .iter()
+                .all(|midi| (*midi - 61.0).abs() < 0.01),
+            "a clear semitone ornament must remain: {:?}",
+            &semitone[8..10]
+        );
+
+        let mut wide_single_frame = midis_from(&[(60.0, 8), (60.82, 1), (60.0, 8)]);
+        suppress_single_frame_zigzags(&mut wide_single_frame);
+        assert!(
+            (wide_single_frame[8] - 60.0).abs() < 0.01,
+            "a 10ms sub-semitone zigzag must be absorbed"
+        );
+        let mut clear_semitone = midis_from(&[(60.0, 8), (61.0, 1), (60.0, 8)]);
+        suppress_single_frame_zigzags(&mut clear_semitone);
+        assert_eq!(
+            clear_semitone[8], 61.0,
+            "a clear semitone must remain even when only one frame is available"
         );
     }
 }

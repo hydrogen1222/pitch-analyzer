@@ -83,3 +83,6 @@ test_output/
 
 # GAME 模型 (本地, 不入库)
 models/GAME-*/
+
+# 本地导出产物
+/*.srt

@@ -201,8 +201,8 @@ impl Default for AnalyzerConfig {
             confidence_threshold: 0.3,
             fmin: 50.0,
             fmax: 2000.0,
-            smoothing: 15,
-            median_smoothing: 11,
+            smoothing: 21,
+            median_smoothing: 13,
             quantize: false,
             note_tracking: NoteTrackingParams::default(),
         }
@@ -227,8 +227,8 @@ impl Default for AnalysisParams {
             confidence_threshold: 0.3,
             fmin: 65.0,
             fmax: 1300.0,
-            smoothing: 15.0,
-            median_smoothing: 11.0,
+            smoothing: 21.0,
+            median_smoothing: 13.0,
             quantize: false,
             min_note_duration_ms: 45.0,
         }
@@ -368,6 +368,10 @@ pub struct ReadingDisplayGroup {
     pub mora_end: usize,
     pub surface: String,
     pub reading: String,
+    /// true 表示这是由显式 `漢字(かな)` 拆出的假名音高槽位。
+    /// char_* 仍指向源歌词汉字范围，但 UI/导出应把音高标在 reading 上。
+    #[serde(default)]
+    pub phonetic: bool,
     #[serde(default)]
     pub start_time: Option<f32>,
     #[serde(default)]
@@ -552,6 +556,8 @@ pub struct NoteEvidence {
 pub enum SungNoteClass {
     Stable,
     Ornament,
+    /// Reserved for a future contour-based glide classifier. A normal change
+    /// from one sung note to another must remain Stable.
     Transition,
     Uncertain,
 }

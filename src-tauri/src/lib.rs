@@ -549,7 +549,32 @@ fn load_lyrics_txt(
     path: String,
 ) -> Result<Vec<LyricLine>, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| format!("读取失败: {}", e))?;
-    let lines = crate::lyrics::parse_txt(&content);
+    let mut lines = crate::lyrics::parse_txt(&content);
+    // A `.txt` file may actually contain timed LRC + inline ruby. Give it the
+    // exact same acoustic alignment path as the LRC import button.
+    if lines
+        .iter()
+        .any(|line| line.start_time.is_some() && line.end_time.is_some())
+    {
+        let track_guard = app_state.track.lock().unwrap();
+        match track_guard.as_ref() {
+            Some(track) => {
+                let align_params = crate::lyrics::TokenAlignParams::default();
+                let audio = app_state.audio_path.lock().unwrap().clone();
+                let fa_guard = app_state.forced_align.lock().unwrap();
+                crate::lyrics::align_token_times_with_backend(
+                    &mut lines,
+                    track,
+                    &align_params,
+                    audio.as_deref().map(Path::new),
+                    fa_guard
+                        .as_ref()
+                        .map(|backend| backend as &dyn crate::forced_align::ForcedAlignBackend),
+                );
+            }
+            None => crate::lyrics::distribute_token_times(&mut lines),
+        }
+    }
     // 先写入 state → rebind → 从更新后的 state clone → 返回
     *app_state.lyrics.lock().unwrap() = lines;
     rebind_lyrics(&app_state);

@@ -27,11 +27,12 @@ export class KaraokeDisplay {
   }
 
   // 音名读数抗抖: vibrato 跨半音边界时 round() 会高频闪烁,
-  // 候选音名需持续 noteHoldSecs 才替换 (MIDI 数值保持实时)
+  // 候选音名需持续 noteHoldSecs 才替换；连续 MIDI 另有 12 cents 死区。
   private shownNote: number | null = null;
   private candidateNote: number | null = null;
   private candidateSince: number = 0;
-  private noteHoldSecs: number = 0.07;
+  private noteHoldSecs: number = 0.12;
+  private midiDeadband: number = 0.12;
 
   /// Debug Overlay: 点击 token 时的回调 (line 下标, token 下标)
   onTokenDebug: ((lineIdx: number, tokenIdx: number) => void) | null = null;
@@ -57,14 +58,16 @@ export class KaraokeDisplay {
   }
 
   setCurrentMidi(midi: number | null) {
-    if (midi === null || !isFinite(midi)) {
+    if (midi === null || !Number.isFinite(midi)) {
       this.currentMidi = null;
       this.shownNote = null;
       this.candidateNote = null;
       return;
     }
-    this.currentMidi = midi;
-    const rounded = Math.round(midi);
+    if (this.currentMidi === null || Math.abs(midi - this.currentMidi) >= this.midiDeadband) {
+      this.currentMidi = midi;
+    }
+    const rounded = Math.round(this.currentMidi);
     if (this.shownNote === null) {
       this.shownNote = rounded;
       this.candidateNote = null;
@@ -120,7 +123,11 @@ export class KaraokeDisplay {
   /// 每帧只更新右下角当前音高小字 (廉价 DOM 更新)
   private updateMidiInfo() {
     if (!this.midiInfoEl) return;
-    if (this.currentMidi !== null && isFinite(this.currentMidi) && this.shownNote !== null) {
+    if (
+      this.currentMidi !== null &&
+      Number.isFinite(this.currentMidi) &&
+      this.shownNote !== null
+    ) {
       const midiRounded = this.shownNote;
       const oct = Math.floor(midiRounded / 12) - 1;
       const noteName = NOTE_NAMES[((midiRounded % 12) + 12) % 12];
@@ -142,7 +149,7 @@ export class KaraokeDisplay {
     noteEl.className = "karaoke-pitch";
     noteEl.style.fontSize = `${this.pitchFontSize}px`;
 
-    if (this.currentMidi !== null && isFinite(this.currentMidi)) {
+    if (this.currentMidi !== null && Number.isFinite(this.currentMidi)) {
       // 音名用保持后的稳定值 (抗 vibrato 闪烁), MIDI 数值保持实时
       if (this.shownNote !== null) {
         const midiRounded = this.shownNote;
@@ -189,10 +196,29 @@ export class KaraokeDisplay {
 
     const tokenWidths = this.calculateTokenWidths(line);
     const groups = this.displayGroups(line);
+    const phoneticLayout = groups.some(({ group }) => group?.phonetic === true);
+    const phoneticBaseWidth = Math.min(
+      92,
+      Math.max(30, Math.floor(900 / Math.max(1, groups.length))),
+    );
 
     groups.forEach(({ tokenIndices, group }) => {
-      const w = tokenIndices.reduce((sum, index) => sum + tokenWidths[index], 0);
-      const isActive = tokenIndices.includes(currentTokenIdx);
+      const phoneticText = group?.reading || group?.surface || "";
+      const w = phoneticLayout
+        ? Math.max(
+            phoneticBaseWidth,
+            Math.ceil(Math.max(1, [...phoneticText].length) * this.lyricFontSize * 1.15),
+          )
+        : tokenIndices.reduce((sum, index) => sum + tokenWidths[index], 0);
+      const timedGroupActive =
+        group?.start_time != null &&
+        group?.end_time != null &&
+        this.currentTime >= group.start_time &&
+        this.currentTime <= group.end_time;
+      const isActive = phoneticLayout
+        ? timedGroupActive ||
+          (group?.start_time == null && tokenIndices.includes(currentTokenIdx))
+        : tokenIndices.includes(currentTokenIdx);
       const leadToken = line.tokens[tokenIndices[0]];
 
       const noteBox = document.createElement("div");
@@ -203,8 +229,14 @@ export class KaraokeDisplay {
 
       // Compact uses the evidence-backed primary. Musical detail uses only
       // consolidated significant notes; raw GAME/FCPE events stay in debug.
-      const notes = group?.pitch_notes?.length ? group.pitch_notes : leadToken.pitch_notes;
-      const primary = group?.primary_note ?? leadToken.primary_note ?? this.bestNote(leadToken);
+      const notes = phoneticLayout
+        ? (group?.pitch_notes ?? [])
+        : group?.pitch_notes?.length
+          ? group.pitch_notes
+          : leadToken.pitch_notes;
+      const primary = phoneticLayout
+        ? (group?.primary_note ?? null)
+        : (group?.primary_note ?? leadToken.primary_note ?? this.bestNote(leadToken));
       if (this.displayMode === "musical-detail" && notes.length > 1) {
         const names = this.formatMusicalDetail(notes);
         const noteEl = document.createElement("span");
@@ -247,25 +279,56 @@ export class KaraokeDisplay {
       groupLyrics.style.width = `${w}px`;
       groupLyrics.style.display = "inline-flex";
       groupLyrics.style.justifyContent = "center";
-      tokenIndices.forEach((i) => {
-        const token = line.tokens[i];
-        const tokenEl = document.createElement("span");
-        tokenEl.style.width = `${tokenWidths[i]}px`;
-        tokenEl.style.textAlign = "center";
-        tokenEl.style.fontSize = `${this.lyricFontSize}px`;
-        tokenEl.style.fontWeight = "700";
-        tokenEl.style.color = i === currentTokenIdx ? "#00d4aa" : "#e6e6e6";
-        tokenEl.textContent = token.text.split("|")[0];
-        tokenEl.style.cursor = "pointer";
+      if (phoneticLayout) {
+        const kanaEl = document.createElement("span");
+        kanaEl.style.width = `${w}px`;
+        kanaEl.style.textAlign = "center";
+        kanaEl.style.fontSize = `${this.lyricFontSize}px`;
+        kanaEl.style.fontWeight = "700";
+        kanaEl.style.color = isActive ? "#00d4aa" : "#f2f2f2";
+        kanaEl.textContent = phoneticText;
+        kanaEl.style.cursor = "pointer";
         const li = this.lyricsLines.indexOf(line);
-        tokenEl.onclick = () => this.onTokenDebug?.(li, i);
-        groupLyrics.appendChild(tokenEl);
-      });
+        kanaEl.onclick = () => this.onTokenDebug?.(li, tokenIndices[0]);
+        groupLyrics.appendChild(kanaEl);
+      } else {
+        tokenIndices.forEach((i) => {
+          const token = line.tokens[i];
+          const tokenEl = document.createElement("span");
+          tokenEl.style.width = `${tokenWidths[i]}px`;
+          tokenEl.style.textAlign = "center";
+          tokenEl.style.fontSize = `${this.lyricFontSize}px`;
+          tokenEl.style.fontWeight = "700";
+          tokenEl.style.color = i === currentTokenIdx ? "#00d4aa" : "#e6e6e6";
+          tokenEl.textContent = token.text.split("|")[0];
+          tokenEl.style.cursor = "pointer";
+          const li = this.lyricsLines.indexOf(line);
+          tokenEl.onclick = () => this.onTokenDebug?.(li, i);
+          groupLyrics.appendChild(tokenEl);
+        });
+      }
       lyricsRow.appendChild(groupLyrics);
     });
 
     wrap.appendChild(notesRow);
     wrap.appendChild(lyricsRow);
+
+    if (phoneticLayout) {
+      const sourceRow = document.createElement("div");
+      sourceRow.style.display = "flex";
+      sourceRow.style.justifyContent = "center";
+      sourceRow.style.whiteSpace = "nowrap";
+      sourceRow.style.marginTop = "2px";
+      line.tokens.forEach((token, index) => {
+        const sourceEl = document.createElement("span");
+        sourceEl.style.fontSize = `${Math.max(12, Math.floor(this.lyricFontSize * 0.78))}px`;
+        sourceEl.style.fontWeight = "600";
+        sourceEl.style.color = index === currentTokenIdx ? "#00a98a" : "#b8b8b8";
+        sourceEl.textContent = token.text.split("|")[0];
+        sourceRow.appendChild(sourceEl);
+      });
+      wrap.appendChild(sourceRow);
+    }
 
     if (line.translations && line.translations.length > 0) {
       const transEl = document.createElement("div");
@@ -309,8 +372,8 @@ export class KaraokeDisplay {
       const name = `${NOTE_NAMES[((rounded % 12) + 12) % 12]}${Math.floor(rounded / 12) - 1}`;
       if (names[names.length - 1] !== name) names.push(name);
     }
-    if (names.length <= 3) return names.join("→");
-    return `${names[0]}→…→${names[names.length - 1]} ×${names.length}`;
+    if (names.length <= 3) return names.join("-");
+    return `${names[0]}-…-${names[names.length - 1]} ×${names.length}`;
   }
 
   private displayGroups(line: LyricLine): Array<{

@@ -1,6 +1,6 @@
-// SRT 导出: 简单输出，每字使用 primary_note (禁止直接取第一个音)
+// SRT 导出: 每句源歌词一个 cue，音符行在上、歌词行在下。
 
-use crate::lyrics::select_primary_note;
+use crate::export::{phonetic_line_text, presentation_segments, source_line_text};
 use crate::models::{midi_to_note_name, LyricLine, PitchTrack};
 use std::io::Write;
 use std::path::Path;
@@ -24,36 +24,55 @@ pub fn export_srt(
     let mut idx = 1u32;
 
     if !lyrics.is_empty() {
-        let mut timed_tokens = 0usize;
+        let mut timed_lines = 0usize;
         for line in lyrics {
-            for token in &line.tokens {
-                let (t_start, t_end) = match (token.start_time, token.end_time) {
-                    (Some(s), Some(e)) => (s, e),
-                    _ => continue,
-                };
-                timed_tokens += 1;
-                let text = if token.text.contains('|') {
-                    token.text.split('|').next().unwrap_or(&token.text)
-                } else {
-                    &token.text
-                };
-                // 使用 primary_note；旧工程无 primary_note 时按评分回退
-                let note_display = token
-                    .primary_note
-                    .clone()
-                    .or_else(|| select_primary_note(&token.pitch_notes, 0.0, 0.0))
-                    .map(|note| format!(" [{}]", midi_to_note_name(note.median_midi)))
-                    .unwrap_or_default();
-                writeln!(f, "{}", idx).map_err(|e| e.to_string())?;
-                writeln!(f, "{} --> {}", to_srt_time(t_start), to_srt_time(t_end))
-                    .map_err(|e| e.to_string())?;
-                writeln!(f, "{}{}\n", text, note_display).map_err(|e| e.to_string())?;
-                idx += 1;
+            let segments = presentation_segments(line);
+            if segments.is_empty() {
+                continue;
             }
+            timed_lines += 1;
+
+            let line_start = segments
+                .iter()
+                .map(|segment| segment.start_time)
+                .fold(f32::INFINITY, f32::min);
+            let line_end = segments
+                .iter()
+                .map(|segment| segment.end_time)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let pitch_row = segments
+                .iter()
+                .map(|segment| segment.note_text.as_deref().unwrap_or("---"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let source = source_line_text(line);
+            let reading = phonetic_line_text(line, &segments);
+            let mut rows = Vec::new();
+            if !pitch_row.is_empty() {
+                rows.push(pitch_row);
+            }
+            if let Some(reading) = reading.filter(|reading| !reading.is_empty()) {
+                rows.push(reading);
+            }
+            if !source.is_empty() {
+                rows.push(source);
+            }
+            let text = rows.join("\n");
+
+            writeln!(f, "{}", idx).map_err(|e| e.to_string())?;
+            writeln!(
+                f,
+                "{} --> {}",
+                to_srt_time(line_start),
+                to_srt_time(line_end)
+            )
+            .map_err(|e| e.to_string())?;
+            writeln!(f, "{}\n", text).map_err(|e| e.to_string())?;
+            idx += 1;
         }
-        if timed_tokens == 0 {
+        if timed_lines == 0 {
             return Err(
-                "歌词没有逐字时间信息 (TXT 歌词需要在导入音频后使用 LRC 才能对齐时间)，无法导出 SRT"
+                "歌词没有逐句时间信息 (TXT 歌词需要在导入音频后使用 LRC 才能对齐时间)，无法导出 SRT"
                     .to_string(),
             );
         }

@@ -144,6 +144,7 @@ fn build_japanese_layers(line: &mut LyricLine) {
     // moras: 必须从读音 (pronunciation 优先, 其次 reading) 展开, 而非 surface
     // (任务书 5.2: surface="愛" reading="あい" 时拿 surface 拆 mora 永远得 0)
     let mut moras: Vec<MoraUnit> = Vec::new();
+    let mut reading_display_groups: Vec<ReadingDisplayGroup> = Vec::new();
     for (si, span) in spans.iter().enumerate() {
         let phonetic = if !span.pronunciation.is_empty() {
             span.pronunciation.clone()
@@ -151,12 +152,62 @@ fn build_japanese_layers(line: &mut LyricLine) {
             span.reading.clone()
         };
         if phonetic.is_empty() {
+            let id = reading_display_groups.len();
+            reading_display_groups.push(ReadingDisplayGroup {
+                id,
+                char_start: span.display_start,
+                char_end: span.display_end,
+                reading_span_id: si,
+                mora_start: span.mora_start,
+                mora_end: span.mora_end,
+                surface: span.surface.clone(),
+                reading: String::new(),
+                phonetic: false,
+                start_time: None,
+                end_time: None,
+                pitch_notes: Vec::new(),
+                primary_note: None,
+                unpitched_reason: None,
+            });
             continue; // 读音未知 (需词典/override), 不产生 mora
         }
         // reading 与 surface 文本一致 (kana-only) → char 区间 1:1 精确;
         // 词典读音 → mora 继承整个 span 的 surface 区间 (coarse, 不伪造逐字映射)
-        let exact = phonetic == span.surface;
-        for pm in mora::parse_kana_moras(&phonetic) {
+        let exact = phonetic == span.surface
+            || phonetic == crate::japanese::unidic::katakana_to_hiragana(&span.surface);
+        // For explicit 漢字(かな), the reading is authoritative and is also the
+        // requested pitch display axis. Split it into one acoustic/display slot
+        // per mora instead of attaching one coarse badge to the source kanji.
+        let explicit_phonetic = line.ruby_annotations.iter().any(|annotation| {
+            annotation.display_start == span.display_start
+                && annotation.display_end == span.display_end
+                && annotation.reading == phonetic
+        });
+        let split_per_mora = exact || explicit_phonetic;
+        let parsed_moras = mora::parse_kana_moras(&phonetic);
+        let coarse_group_id = if split_per_mora {
+            None
+        } else {
+            let id = reading_display_groups.len();
+            reading_display_groups.push(ReadingDisplayGroup {
+                id,
+                char_start: span.display_start,
+                char_end: span.display_end,
+                reading_span_id: si,
+                mora_start: span.mora_start,
+                mora_end: span.mora_end,
+                surface: span.surface.clone(),
+                reading: phonetic.clone(),
+                phonetic: false,
+                start_time: None,
+                end_time: None,
+                pitch_notes: Vec::new(),
+                primary_note: None,
+                unpitched_reason: None,
+            });
+            Some(id)
+        };
+        for (local_mora_index, pm) in parsed_moras.into_iter().enumerate() {
             let (cs, ce) = if exact {
                 (
                     span.char_start + pm.char_start,
@@ -164,6 +215,37 @@ fn build_japanese_layers(line: &mut LyricLine) {
                 )
             } else {
                 (span.char_start, span.char_end) // coarse display span
+            };
+            let display_group_id = if let Some(id) = coarse_group_id {
+                id
+            } else {
+                let id = reading_display_groups.len();
+                let surface: String = if exact {
+                    line.primary_text
+                        .chars()
+                        .skip(cs)
+                        .take(ce.saturating_sub(cs))
+                        .collect()
+                } else {
+                    span.surface.clone()
+                };
+                reading_display_groups.push(ReadingDisplayGroup {
+                    id,
+                    char_start: cs,
+                    char_end: ce,
+                    reading_span_id: si,
+                    mora_start: span.mora_start + local_mora_index,
+                    mora_end: span.mora_start + local_mora_index + 1,
+                    surface,
+                    reading: pm.kana.clone(),
+                    phonetic: explicit_phonetic,
+                    start_time: None,
+                    end_time: None,
+                    pitch_notes: Vec::new(),
+                    primary_note: None,
+                    unpitched_reason: None,
+                });
+                id
             };
             let phonemes = phoneme::mora_to_phonemes(&pm.kana);
             moras.push(MoraUnit {
@@ -174,9 +256,9 @@ fn build_japanese_layers(line: &mut LyricLine) {
                 char_end: ce,
                 reading_offset_start: pm.char_start,
                 reading_offset_end: pm.char_end,
-                display_start: span.display_start,
-                display_end: span.display_end,
-                display_group_id: si,
+                display_start: if exact { cs } else { span.display_start },
+                display_end: if exact { ce } else { span.display_end },
+                display_group_id,
                 start_time: None,
                 end_time: None,
                 confidence: span.confidence,
@@ -184,26 +266,6 @@ fn build_japanese_layers(line: &mut LyricLine) {
             });
         }
     }
-
-    let reading_display_groups: Vec<ReadingDisplayGroup> = spans
-        .iter()
-        .enumerate()
-        .map(|(id, span)| ReadingDisplayGroup {
-            id,
-            char_start: span.display_start,
-            char_end: span.display_end,
-            reading_span_id: id,
-            mora_start: span.mora_start,
-            mora_end: span.mora_end,
-            surface: span.surface.clone(),
-            reading: span.reading.clone(),
-            start_time: None,
-            end_time: None,
-            pitch_notes: Vec::new(),
-            primary_note: None,
-            unpitched_reason: None,
-        })
-        .collect();
 
     // token ↔ reading_span/display_group 关联 (canonical display char offset)
     let mut tokens = std::mem::take(&mut line.tokens);
@@ -308,6 +370,15 @@ pub fn token_weight(text: &str) -> f32 {
 // ── TXT Parser ─────────────────────────────────────────────
 
 pub fn parse_txt(text: &str) -> Vec<LyricLine> {
+    // Common lyric sites distribute LRC syntax with a `.txt` extension. Treat
+    // it as timed lyrics so metadata is ignored, same-timestamp translations
+    // are merged, and 漢字(かな) remains authoritative ruby.
+    let timed_line_re =
+        Regex::new(r"(?m)^\s*\[\d{1,2}:\d{1,2}(?:\.\d{1,3})?\]").expect("valid timed TXT regex");
+    if timed_line_re.is_match(text) {
+        return parse_lrc(text, None);
+    }
+
     let mut lines = Vec::new();
     for line_str in text.lines() {
         let trimmed = line_str.trim();
@@ -619,7 +690,7 @@ fn project_mora_times_to_groups_and_tokens(
             for mora in line
                 .moras
                 .iter()
-                .filter(|mora| mora.reading_span_id == group.reading_span_id)
+                .filter(|mora| mora.display_group_id == group.id)
             {
                 if let (Some(start), Some(end)) = (mora.start_time, mora.end_time) {
                     first = Some(first.map_or(start, |value: f32| value.min(start)));
@@ -1186,6 +1257,10 @@ fn dp_align_line(
 
 const MIN_NOTE_FRAMES: usize = 5;
 const DOMINANT_NOTE_RATIO: f32 = 0.65;
+/// MoraDP may place a consonant→vowel FCPE onset exactly on the boundary to
+/// the next mora. Within the same explicit ruby word, permit a small evidence
+/// look-ahead so the consonant-leading mora can claim its real vowel pitch.
+const PHONETIC_ONSET_GRACE_SECS: f32 = 0.20;
 
 /// 绑定 pitch 到每个 token (软评分, many-to-many) 并选 primary_note。
 ///
@@ -1492,12 +1567,33 @@ fn bind_line_at_display_group_level<T: NoteWindow>(
     }
     let mut group_results: Vec<(Vec<PitchNote>, Option<PitchNote>, Option<UnpitchedReason>)> =
         Vec::with_capacity(line.reading_display_groups.len());
-    for group in &line.reading_display_groups {
+    for (group_index, group) in line.reading_display_groups.iter().enumerate() {
         let (Some(start), Some(end)) = (group.start_time, group.end_time) else {
             group_results.push((Vec::new(), None, Some(UnpitchedReason::AlignmentMissing)));
             continue;
         };
-        let cands = admit_events_for_window(events, start, end);
+        let mut evidence_end = end;
+        let mut cands = admit_events_for_window(events, start, evidence_end);
+        if cands.is_empty() && group.phonetic {
+            if let Some(next) = line
+                .reading_display_groups
+                .get(group_index + 1)
+                .filter(|next| {
+                    next.phonetic
+                        && next.char_start == group.char_start
+                        && next.char_end == group.char_end
+                        && next
+                            .start_time
+                            .is_some_and(|next_start| (next_start - end).abs() <= 0.03)
+                })
+            {
+                evidence_end = next
+                    .end_time
+                    .unwrap_or(end + PHONETIC_ONSET_GRACE_SECS)
+                    .min(end + PHONETIC_ONSET_GRACE_SECS);
+                cands = admit_events_for_window(events, start, evidence_end);
+            }
+        }
         if cands.is_empty() {
             group_results.push((
                 Vec::new(),
@@ -1517,7 +1613,7 @@ fn bind_line_at_display_group_level<T: NoteWindow>(
             let event = &events[idx];
             let (event_start, event_end) = event.window();
             let rs = event_start.max(start);
-            let re = event_end.min(end);
+            let re = event_end.min(evidence_end);
             notes.push(note_window_to_pitch_note(event, rs, re));
             scores.push(primary_score(event, overlap));
         }

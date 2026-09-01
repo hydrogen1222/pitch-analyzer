@@ -42,6 +42,52 @@ fn test_parse_txt_simple() {
 }
 
 #[test]
+fn timed_ruby_txt_uses_lrc_parser_and_builds_kana_pitch_slots() {
+    let text = r#"[ar:岡村孝子]
+[al:SOLEIL]
+[ti:ドラマ]
+
+[00:18.000]冷(つめ)たく微笑(ほほえ)んだ[00:25.020]
+[00:18.000]冷冷地泛起微笑[00:25.020]"#;
+    let lines = parse_txt(text);
+    assert_eq!(
+        lines.len(),
+        1,
+        "metadata and translation must not become lyric lines"
+    );
+    let line = &lines[0];
+    assert_eq!(line.start_time, Some(18.0));
+    assert_eq!(line.end_time, Some(25.02));
+    assert_eq!(line.primary_text, "冷たく微笑んだ");
+    assert_eq!(line.translations, ["冷冷地泛起微笑"]);
+
+    let reading: String = line
+        .reading_display_groups
+        .iter()
+        .map(|group| {
+            if group.reading.is_empty() {
+                group.surface.as_str()
+            } else {
+                group.reading.as_str()
+            }
+        })
+        .collect();
+    assert_eq!(reading, "つめたくほほえんだ");
+    assert_eq!(
+        line.reading_display_groups
+            .iter()
+            .filter(|group| group.phonetic)
+            .map(|group| group.reading.as_str())
+            .collect::<Vec<_>>(),
+        ["つ", "め", "ほ", "ほ", "え"]
+    );
+    assert!(line
+        .reading_display_groups
+        .iter()
+        .all(|group| group.mora_end - group.mora_start <= 1));
+}
+
+#[test]
 fn test_parse_lrc_simple() {
     let lrc = "[00:01.00]第一行\n[00:05.00]第二行\n[00:09.00]最后一行";
     let lines = parse_lrc(lrc, Some(15.0));

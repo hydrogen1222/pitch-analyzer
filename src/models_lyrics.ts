@@ -65,6 +65,8 @@ export interface ReadingDisplayGroup {
   mora_end: number;
   surface: string;
   reading: string;
+  /** Explicit 漢字(かな) input: place pitch over this kana slot, not the kanji. */
+  phonetic?: boolean;
   start_time?: number | null;
   end_time?: number | null;
   pitch_notes: PitchNote[];

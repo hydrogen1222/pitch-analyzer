@@ -8,15 +8,16 @@
 //          音高行按字单独定位在对应字上方, x 坐标按等宽估算对齐。
 //          不做字幕编辑器，只做最小化 exporter。
 
-use crate::lyrics::select_primary_note;
-use crate::models::{midi_to_note_name, LyricLine, LyricToken};
+use crate::export::{presentation_segments, PresentationSegment};
+use crate::models::{LyricLine, LyricToken};
 use std::io::Write;
 use std::path::Path;
 
 const PLAY_RES_X: u32 = 1280;
 const PLAY_RES_Y: u32 = 720;
 const LYRIC_MARGIN_V: u32 = 60;
-const PITCH_Y: f32 = 540.0;
+const PITCH_Y: f32 = 510.0;
+const READING_Y: f32 = 570.0;
 
 /// 导出 ASS 字幕。pitch_font_size / lyric_font_size 为基础字号。
 pub fn export_ass(
@@ -57,6 +58,12 @@ pub fn export_ass(
         lyric_font, LYRIC_MARGIN_V
     )
     .map_err(|e| e.to_string())?;
+    writeln!(
+        f,
+        "Style: Reading,Noto Sans CJK JP,{},&H00FFFFFF,&H00B4FF7D,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,5,40,40,30,1",
+        lyric_font
+    )
+    .map_err(|e| e.to_string())?;
     writeln!(f).map_err(|e| e.to_string())?;
     writeln!(f, "[Events]").map_err(|e| e.to_string())?;
     writeln!(
@@ -75,34 +82,93 @@ pub fn export_ass(
             continue;
         }
 
-        // ── 音高行: 每字一条 Dialogue, \pos 到估算的字中心上方 ──
+        let segments = presentation_segments(line);
+        if segments.is_empty() {
+            continue;
+        }
+
+        // ── 音高行: 每个显示组一条 Dialogue, \pos 到对应组中心上方 ──
+        // 多个 Dialogue 仍位于同一条视觉音高行；这样既保持歌词块对齐，
+        // 又能让一个组内的转音以 `D4-C4` 作为完整标签显示。
         let centers = estimate_token_centers(&tokens, lyric_font);
-        for (i, token) in tokens.iter().enumerate() {
-            let s = token.start_time.unwrap();
-            let e = token.end_time.unwrap();
-            if let Some(note) = token
-                .primary_note
-                .clone()
-                .or_else(|| select_primary_note(&token.pitch_notes, 0.0, 0.0))
-            {
-                let name = midi_to_note_name(note.median_midi);
-                if name != "---" {
-                    let pitch_dialog = format!("{{\\pos({:.0},{})}}{}", centers[i], PITCH_Y, name);
-                    writeln!(
-                        f,
-                        "Dialogue: 0,{},{},Pitch,,0,0,0,,{}",
-                        to_ass_time(s),
-                        to_ass_time(e),
-                        pitch_dialog
-                    )
-                    .map_err(|e| e.to_string())?;
-                }
+        let timed_indices: Vec<usize> = line
+            .tokens
+            .iter()
+            .enumerate()
+            .filter_map(|(index, token)| token.start_time.zip(token.end_time).map(|_| index))
+            .collect();
+        let phonetic_layout = segments.iter().any(|segment| segment.phonetic);
+        let phonetic_centers = phonetic_layout.then(|| {
+            estimate_text_centers(
+                &segments
+                    .iter()
+                    .map(|segment| segment.display_text.as_str())
+                    .collect::<Vec<_>>(),
+                lyric_font,
+            )
+        });
+        for (segment_index, segment) in segments.iter().enumerate() {
+            if let Some(name) = &segment.note_text {
+                let center = phonetic_centers
+                    .as_ref()
+                    .and_then(|positions| positions.get(segment_index).copied())
+                    .unwrap_or_else(|| {
+                        estimate_segment_center(
+                            segment,
+                            &timed_indices,
+                            &tokens,
+                            &centers,
+                            lyric_font,
+                        )
+                    });
+                let pitch_dialog = format!("{{\\pos({:.0},{})}}{}", center, PITCH_Y, name);
+                writeln!(
+                    f,
+                    "Dialogue: 0,{},{},Pitch,,0,0,0,,{}",
+                    to_ass_time(segment.start_time),
+                    to_ass_time(segment.end_time),
+                    pitch_dialog
+                )
+                .map_err(|e| e.to_string())?;
             }
         }
 
         // ── 歌词行: 整行一条 Dialogue, \k 逐字点亮 ──
-        let line_start = tokens[0].start_time.unwrap();
-        let line_end = tokens.last().unwrap().end_time.unwrap();
+        let line_start = segments
+            .iter()
+            .map(|segment| segment.start_time)
+            .fold(f32::INFINITY, f32::min);
+        let line_end = segments
+            .iter()
+            .map(|segment| segment.end_time)
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        // Explicit ruby gets its own kana row. Pitch centers above are based on
+        // this row, while the original kanji source remains a separate line.
+        if phonetic_layout {
+            let mut reading_text = String::new();
+            let mut previous_start = line_start;
+            for segment in &segments {
+                let cs = (((segment.start_time - previous_start) * 100.0).round() as i64).max(0);
+                reading_text.push_str(&format!(
+                    "{{\\k{}}}{}",
+                    cs,
+                    escape_ass(&segment.display_text)
+                ));
+                previous_start = segment.start_time;
+            }
+            writeln!(
+                f,
+                "Dialogue: 0,{},{},Reading,,0,0,0,,{{\\pos({:.0},{:.0})}}{}",
+                to_ass_time(line_start),
+                to_ass_time(line_end),
+                PLAY_RES_X as f32 / 2.0,
+                READING_Y,
+                reading_text
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
         let mut karaoke_text = String::new();
         let mut prev_start = line_start;
         for token in &tokens {
@@ -125,22 +191,68 @@ pub fn export_ass(
     Ok(())
 }
 
+fn estimate_text_centers(texts: &[&str], font_size: u32) -> Vec<f32> {
+    let mut widths: Vec<f32> = texts
+        .iter()
+        .map(|text| token_width(text, font_size).max(font_size as f32 * 0.9))
+        .collect();
+    let max_width = PLAY_RES_X as f32 - 80.0;
+    let total: f32 = widths.iter().sum();
+    if total > max_width {
+        let scale = max_width / total;
+        for width in &mut widths {
+            *width *= scale;
+        }
+    }
+    let fitted_total: f32 = widths.iter().sum();
+    let mut x = ((PLAY_RES_X as f32 - fitted_total) / 2.0).max(40.0);
+    widths
+        .into_iter()
+        .map(|width| {
+            let center = x + width / 2.0;
+            x += width;
+            center
+        })
+        .collect()
+}
+
+fn estimate_segment_center(
+    segment: &PresentationSegment,
+    timed_indices: &[usize],
+    timed_tokens: &[&LyricToken],
+    centers: &[f32],
+    lyric_font: u32,
+) -> f32 {
+    let mut left = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+    for &token_index in &segment.token_indices {
+        let Some(position) = timed_indices.iter().position(|&index| index == token_index) else {
+            continue;
+        };
+        let width = token_width(
+            timed_tokens[position]
+                .text
+                .split('|')
+                .next()
+                .unwrap_or(&timed_tokens[position].text),
+            lyric_font,
+        );
+        left = left.min(centers[position] - width / 2.0);
+        right = right.max(centers[position] + width / 2.0);
+    }
+    if left.is_finite() && right.is_finite() {
+        (left + right) / 2.0
+    } else {
+        PLAY_RES_X as f32 / 2.0
+    }
+}
+
 /// 估算每个 token 在底部居中行内的 x 中心坐标。
 /// CJK/全角字符按 1.0 倍字号, 其他 (拉丁/数字/半角标点) 按 0.55 倍估算。
 fn estimate_token_centers(tokens: &[&LyricToken], lyric_font: u32) -> Vec<f32> {
-    let char_w = |ch: char| -> f32 {
-        let is_wide = (ch as u32) >= 0x2E80 || ('\u{FF00}'..='\u{FFEF}').contains(&ch);
-        if is_wide {
-            lyric_font as f32
-        } else {
-            lyric_font as f32 * 0.55
-        }
-    };
-    let token_w = |t: &str| -> f32 { t.chars().map(char_w).sum() };
-
     let total: f32 = tokens
         .iter()
-        .map(|t| token_w(t.text.split('|').next().unwrap_or(&t.text)))
+        .map(|t| token_width(t.text.split('|').next().unwrap_or(&t.text), lyric_font))
         .sum();
     let max_width = (PLAY_RES_X as f32) - 80.0;
     let mut x = if total > max_width {
@@ -153,12 +265,25 @@ fn estimate_token_centers(tokens: &[&LyricToken], lyric_font: u32) -> Vec<f32> {
         .iter()
         .map(|t| {
             let text = t.text.split('|').next().unwrap_or(&t.text);
-            let w = token_w(text);
+            let w = token_width(text, lyric_font);
             let center = x + w / 2.0;
             x += w;
             center
         })
         .collect()
+}
+
+fn token_width(text: &str, lyric_font: u32) -> f32 {
+    text.chars()
+        .map(|ch| {
+            let is_wide = (ch as u32) >= 0x2E80 || ('\u{FF00}'..='\u{FFEF}').contains(&ch);
+            if is_wide {
+                lyric_font as f32
+            } else {
+                lyric_font as f32 * 0.55
+            }
+        })
+        .sum()
 }
 
 /// ASS 时间: H:MM:SS.cc

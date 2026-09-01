@@ -57,8 +57,8 @@ function getCurrentParams(): AnalysisParams {
     confidence_threshold: 0.3,
     fmin: 65,
     fmax: 1300,
-    smoothing: 15,
-    median_smoothing: 11,
+    smoothing: 21,
+    median_smoothing: 13,
     quantize: false,
     min_note_duration_ms: 45,
   };
@@ -89,7 +89,7 @@ function updateTimeDisplay() {
 }
 
 /// 当前位置的平滑音高读数:
-/// - ±2 帧 (50ms) 窗口内取中值 → 吸收单帧错误与边缘半音抖动
+/// - ±4 帧 (90ms) 窗口内取中值 → 音高读数更迟钝，不追逐 10-30ms 微抖
 /// - 最近有限帧距离 > 2 帧视为真正的无声间隙 → 显示 ---
 function smoothedMidiAt(track: PitchTrack, t: number): number | null {
   const { times, midis } = track;
@@ -107,7 +107,7 @@ function smoothedMidiAt(track: PitchTrack, t: number): number | null {
   }
   const at = (k: number) => {
     const m = midis[k];
-    return m !== undefined && isFinite(m) ? m : null;
+    return typeof m === "number" && Number.isFinite(m) ? m : null;
   };
   if (at(idx) === null) {
     let nearest = Infinity;
@@ -117,7 +117,7 @@ function smoothedMidiAt(track: PitchTrack, t: number): number | null {
     if (nearest > 2) return null;
   }
   const vals: number[] = [];
-  for (let k = Math.max(0, idx - 2); k <= Math.min(times.length - 1, idx + 2); k++) {
+  for (let k = Math.max(0, idx - 4); k <= Math.min(times.length - 1, idx + 4); k++) {
     const v = at(k);
     if (v !== null) vals.push(v);
   }

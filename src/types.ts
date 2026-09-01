@@ -3,7 +3,8 @@ export interface PitchTrack {
   times: number[];
   frequencies: number[];
   confidences: number[];
-  midis: number[];
+  /** Unvoiced Rust NaN frames cross the Tauri JSON boundary as null. */
+  midis: Array<number | null>;
   rms?: number[];
   flux?: number[];
   note_events?: NoteEvent[];

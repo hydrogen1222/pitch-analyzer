@@ -61,7 +61,34 @@ pub fn compare_game_reference(
             .partial_cmp(&b.start)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let compared = actual.len().min(expected.len());
+
+    // GAME 的 segmenter 是 D3PM 扩散: 官方 decode 在每步前按 p(t) 随机丢弃
+    // mutable boundaries (d3pm.rs remove_boundaries 的 torch.rand), 因此两条
+    // 推理在临界 boundary 上有 ±1 音符的固有方差。直接 zip 会让一次错位
+    // 污染全部后续 MAE; 这里用贪心最近邻配对 (onset 差 <= 0.25s)。
+    const MATCH_TOLERANCE: f32 = 0.25;
+    let mut pairs: Vec<(&MusicalNoteEvent, &GameReferenceNote)> = Vec::new();
+    {
+        let mut used_ref = vec![false; expected.len()];
+        for a in &actual {
+            let mut best: Option<(usize, f32)> = None;
+            for (ri, b) in expected.iter().enumerate() {
+                if used_ref[ri] {
+                    continue;
+                }
+                let d = (a.start - b.start).abs();
+                if d <= MATCH_TOLERANCE && best.is_none_or(|(_, bd)| d < bd) {
+                    best = Some((ri, d));
+                }
+            }
+            if let Some((ri, _)) = best {
+                used_ref[ri] = true;
+                pairs.push((a, expected[ri]));
+            }
+        }
+    }
+
+    let compared = pairs.len();
     let pitch_agreement = if compared == 0 {
         if actual.is_empty() && expected.is_empty() {
             1.0
@@ -69,10 +96,8 @@ pub fn compare_game_reference(
             0.0
         }
     } else {
-        actual
+        pairs
             .iter()
-            .zip(expected.iter())
-            .take(compared)
             .filter(|(a, b)| (a.midi_float - b.midi).abs() <= 0.5)
             .count() as f32
             / compared as f32
@@ -80,10 +105,8 @@ pub fn compare_game_reference(
     let onset_mae = if compared == 0 {
         f32::INFINITY
     } else {
-        actual
+        pairs
             .iter()
-            .zip(expected.iter())
-            .take(compared)
             .map(|(a, b)| (a.start - b.start).abs())
             .sum::<f32>()
             / compared as f32
@@ -91,10 +114,8 @@ pub fn compare_game_reference(
     let offset_mae = if compared == 0 {
         f32::INFINITY
     } else {
-        actual
+        pairs
             .iter()
-            .zip(expected.iter())
-            .take(compared)
             .map(|(a, b)| (a.end - b.end).abs())
             .sum::<f32>()
             / compared as f32
@@ -103,7 +124,7 @@ pub fn compare_game_reference(
         if rust_notes.is_empty() {
             0.0
         } else {
-            1.0
+            f32::INFINITY
         }
     } else {
         (rust_notes.len() as f32 - reference.len() as f32).abs() / reference.len() as f32

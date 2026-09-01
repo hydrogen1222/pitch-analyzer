@@ -123,8 +123,9 @@ fn game_mode_b_accepts_external_boundaries() {
 fn required_fixture(name: &str) -> PathBuf {
     let key = format!("ROUND3_{name}");
     let path = std::env::var_os(&key)
+        .or_else(|| std::env::var_os(name))
         .map(PathBuf::from)
-        .unwrap_or_else(|| panic!("{key} must point to an acceptance fixture"));
+        .unwrap_or_else(|| panic!("{key} (or {name}) must point to an acceptance fixture"));
     assert!(path.is_file(), "fixture does not exist: {}", path.display());
     path
 }

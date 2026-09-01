@@ -7,15 +7,19 @@
 //   3. Clean Pitch 层: 无 ≤80ms 的快速大跳往返 (气声/起音毛刺)
 //   4. MIDI 值域合理, voiced 比例合理
 //   5. LRC 绑定: 对齐到有声区域的歌词大部分获得主音
+//   6. Clean Pitch 层: 无单帧 ≥25 cents 的快速锯齿
 //
 // 依赖 models/fcpe.onnx + fcpe_config.json (缺失时跳过)。
 // 运行: cargo test --release --test real_song_test -- --ignored --nocapture
 
 use pitch_analyzer_tauri_lib::analyzer::PitchAnalyzer;
 use pitch_analyzer_tauri_lib::lyrics::{
-    align_token_times, bind_pitch_to_tokens, parse_lrc, TokenAlignParams,
+    align_token_times, bind_pitch_to_tokens, parse_lrc, parse_txt, TokenAlignParams,
 };
 use pitch_analyzer_tauri_lib::models::{AnalysisParams, NoteTrackingParams, PitchTrack};
+use pitch_analyzer_tauri_lib::note_engine::{
+    CanonicalNotePostProcessor, GameNoteEngine, MusicalNoteEngine, MusicalNoteSource,
+};
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
@@ -320,13 +324,19 @@ fn real_songs_acceptance() {
         );
         assert_eq!(spikes, 0, "transient pitch spikes must be cleaned");
 
-        // 残余细抖动统计 (观察指标, 暂不强制)
+        // 残余细抖动统计。25 cents 的单帧往返已经足以造成肉眼可见的线条闪动，
+        // 因此作为硬性回归门槛；更大的统计同时保留，便于定位。
         let small_spikes = count_transient_spikes(&track.midis, 5, 2.0);
         let zigzag = count_zigzag(&track.midis, 2.0);
         let zigzag1 = count_zigzag(&track.midis, 1.0);
+        let zigzag025 = count_zigzag(&track.midis, 0.25);
         println!(
-            "  jitter stats: <=50ms/>=2semi roundtrip: {}, 1-frame zigzag >=2semi: {}, >=1semi: {}",
-            small_spikes, zigzag, zigzag1
+            "  jitter stats: <=50ms/>=2semi roundtrip: {}, 1-frame zigzag >=2semi: {}, >=1semi: {}, >=25c: {}",
+            small_spikes, zigzag, zigzag1, zigzag025
+        );
+        assert_eq!(
+            zigzag025, 0,
+            "single-frame pitch jitter >=25 cents must be suppressed"
         );
         // 孤立发声孤岛 (静音里的 1-2 帧毛刺) 必须为 0
         let blips = count_isolated_voiced_islands(&track.midis, 2);
@@ -459,7 +469,10 @@ fn simulate_display(
 fn real_lrc_full_chain() {
     pitch_analyzer_tauri_lib::try_init_ort_dylib();
     let lrc_path = std::env::var("LRC_PATH").unwrap_or_else(|_| {
-        r"C:\Users\tp798\Documents\Lyrics\岡村孝子 - ドラマ (636813).lrc".to_string()
+        repo_root()
+            .join("岡村孝子 - ドラマ (636813) -歌词注音版.txt")
+            .to_string_lossy()
+            .to_string()
     });
     let Ok(content) = std::fs::read_to_string(&lrc_path) else {
         skip_or_fail_in_acceptance(&format!("LRC not found at {}", lrc_path));
@@ -479,11 +492,31 @@ fn real_lrc_full_chain() {
 
     // 1. 分析音频
     let analyzer = PitchAnalyzer::new(model_path.to_str().unwrap(), cent_table).unwrap();
-    let track = run_pipeline(&analyzer, song);
-    let duration = track.times.last().copied().unwrap_or(0.0);
-
-    // 2. 与 load_lyrics_lrc 命令完全相同的流程
-    let mut lines = parse_lrc(&content, Some(duration));
+    let mut track = run_pipeline(&analyzer, song);
+    if std::env::var("REAL_USE_GAME").as_deref() == Ok("1") {
+        let model_dir = repo_root().join("models/GAME-1.0.3-small-onnx");
+        let engine = GameNoteEngine::try_load(&model_dir).expect("load GAME model");
+        let decoded =
+            pitch_analyzer_tauri_lib::audio::load_audio_mono(song, engine.target_sample_rate())
+                .expect("decode GAME audio");
+        let raw = engine
+            .transcribe(&decoded.samples, decoded.sample_rate, None)
+            .expect("GAME inference");
+        let processor = CanonicalNotePostProcessor::new(0.3);
+        let canonical = processor.process(&raw, &track);
+        track.raw_game_notes = raw;
+        track.canonical_sung_notes = canonical.clone();
+        track.musical_notes = processor.accepted_events(&canonical);
+        track.musical_note_source = MusicalNoteSource::Game;
+        track.musical_note_model = Some(engine.model_tag().to_string());
+        println!(
+            "GAME canonical: raw={} accepted={}",
+            track.raw_game_notes.len(),
+            track.musical_notes.len()
+        );
+    }
+    // 2. 与 load_lyrics_txt 命令相同: 自动识别 txt 内的 timed LRC + ruby。
+    let mut lines = parse_txt(&content);
     println!("parsed lines: {}", lines.len());
     assert!(!lines.is_empty(), "LRC parsed to nothing");
     // 双语行: 主文本为日文原文, 翻译为中文, 不应有句子被吞进错误行
@@ -505,10 +538,18 @@ fn real_lrc_full_chain() {
     for line in &lines {
         let (ls, le) = (line.start_time.unwrap(), line.end_time.unwrap());
         assert!(line.token_timing_auto, "DP/distribute must set timing_auto");
-        for w in line.tokens.windows(2) {
+        for (token_index, w) in line.tokens.windows(2).enumerate() {
+            let share_display_group = w[0]
+                .reading_group_ids
+                .iter()
+                .any(|group| w[1].reading_group_ids.contains(group));
             assert!(
-                w[1].start_time.unwrap() >= w[0].end_time.unwrap() - 1e-4,
-                "token overlap"
+                share_display_group || w[1].start_time.unwrap() >= w[0].end_time.unwrap() - 1e-4,
+                "unexpected token overlap in line {:?} at {}: {:?} {:?}",
+                line.primary_text,
+                token_index,
+                w[0],
+                w[1]
             );
         }
         for t in &line.tokens {
@@ -558,36 +599,99 @@ fn real_lrc_full_chain() {
         lines.len()
     );
 
-    // 5. 每行内高亮字必须变化 (行时长 > 2s 且 token 数 >= 4 时)
+    // 5. 每行内假名音高槽位必须随自身 mora 时间推进。
     for (li, line) in lines.iter().enumerate() {
         let (ls, le) = (line.start_time.unwrap(), line.end_time.unwrap());
         if le - ls < 2.0 || line.tokens.len() < 4 {
             continue;
         }
-        let mut seen = std::collections::HashSet::new();
+        let mut seen_groups = std::collections::HashSet::new();
         let mut t = ls + 0.05;
         while t <= le - 0.05 {
-            let one_line = [line.clone()];
-            let (_, tok) = simulate_display(&one_line, t);
-            seen.insert(tok);
+            for group in &line.reading_display_groups {
+                if group
+                    .start_time
+                    .zip(group.end_time)
+                    .is_some_and(|(start, end)| t >= start && t <= end)
+                {
+                    seen_groups.insert(group.id);
+                }
+            }
             t += 0.05;
         }
+        let expected_states = line.reading_display_groups.len().max(1);
         println!(
-            "  line {}: {} tokens, {} highlight states",
+            "  line {}: {} tokens / {} display groups, {} highlight states",
             li,
             line.tokens.len(),
-            seen.len()
+            expected_states,
+            seen_groups.len()
         );
         assert!(
-            seen.len() >= (line.tokens.len() as f32 * 0.5).floor() as usize,
-            "token highlight must advance within line {}: {} states for {} tokens",
+            seen_groups.len() >= (expected_states as f32 * 0.5).floor() as usize,
+            "display-group highlight must advance within line {}: {} states for {} groups",
             li,
-            seen.len(),
-            line.tokens.len()
+            seen_groups.len(),
+            expected_states
         );
     }
 
-    // 6. 主音覆盖率
+    // 6. 主音覆盖率。Round3.2 后同一 ReadingDisplayGroup 只在 acoustic
+    // group 上持有一份音符证据，不能再用非 lead glyph 当成漏音。
+    for line in lines.iter().filter(|line| {
+        line.primary_text == "悲しい位に見つめてた"
+            || line.primary_text == "せつないほど背伸びをしてた"
+    }) {
+        println!("\n  target line: {}", line.primary_text);
+        for group in &line.reading_display_groups {
+            let notes = group
+                .pitch_notes
+                .iter()
+                .map(|note| pitch_analyzer_tauri_lib::models::midi_to_note_name(note.median_midi))
+                .collect::<Vec<_>>()
+                .join("-");
+            let primary = group
+                .primary_note
+                .as_ref()
+                .map(|note| pitch_analyzer_tauri_lib::models::midi_to_note_name(note.median_midi))
+                .unwrap_or_else(|| "---".to_string());
+            println!(
+                "    {:?} reading={:?} [{:.3}..{:.3}] primary={} notes={} reason={:?}",
+                group.surface,
+                group.reading,
+                group.start_time.unwrap_or(-1.0),
+                group.end_time.unwrap_or(-1.0),
+                primary,
+                notes,
+                group.unpitched_reason
+            );
+        }
+        let phonetic_row: String = line
+            .reading_display_groups
+            .iter()
+            .map(|group| {
+                if group.reading.is_empty() {
+                    group.surface.as_str()
+                } else {
+                    group.reading.as_str()
+                }
+            })
+            .collect();
+        assert!(
+            !phonetic_row.is_empty() && !line.primary_text.is_empty(),
+            "both kana pitch row and source kanji row must be preserved"
+        );
+        if std::env::var("REAL_USE_GAME").as_deref() == Ok("1") {
+            assert!(
+                line.reading_display_groups
+                    .iter()
+                    .all(|group| group.primary_note.is_some()),
+                "production GAME path must cover every target display group: {}",
+                line.primary_text
+            );
+        }
+    }
+
     let total: usize = lines.iter().map(|l| l.tokens.len()).sum();
     let bound: usize = lines
         .iter()
@@ -600,8 +704,23 @@ fn real_lrc_full_chain() {
         total,
         100.0 * bound as f32 / total as f32
     );
+    let total_groups: usize = lines
+        .iter()
+        .map(|line| line.reading_display_groups.len())
+        .sum();
+    let bound_groups: usize = lines
+        .iter()
+        .flat_map(|line| &line.reading_display_groups)
+        .filter(|group| group.primary_note.is_some())
+        .count();
+    println!(
+        "display-group primary coverage: {}/{} ({:.0}%)",
+        bound_groups,
+        total_groups,
+        100.0 * bound_groups as f32 / total_groups.max(1) as f32
+    );
     assert!(
-        bound as f32 / total as f32 > 0.5,
-        "primary coverage too low"
+        bound_groups as f32 / total_groups.max(1) as f32 > 0.5,
+        "display-group primary coverage too low"
     );
 }

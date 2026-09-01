@@ -54,7 +54,7 @@ impl CanonicalNotePostProcessor {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
         });
-        self.consolidate(notes)
+        self.consolidate(notes, track)
     }
 
     /// Convert accepted canonical notes into the legacy-compatible event
@@ -87,23 +87,8 @@ impl CanonicalNotePostProcessor {
 
     fn make_candidate(&self, event: &MusicalNoteEvent, track: &PitchTrack) -> CanonicalSungNote {
         let evidence = self.measure(event, track);
-        let delta = evidence.pitch_delta_cents.unwrap_or(f32::INFINITY).abs();
-        let class = if evidence.fcpe_frame_count == 0
-            || evidence.voiced_coverage < 0.20
-            || delta > self.maximum_pitch_delta_cents
-            || evidence.support_score < self.minimum_support
-        {
-            SungNoteClass::Uncertain
-        } else if event.duration() < 0.10 {
-            SungNoteClass::Ornament
-        } else {
-            SungNoteClass::Stable
-        };
-        let display_midi = if class == SungNoteClass::Uncertain {
-            event.midi_float
-        } else {
-            evidence.median_midi.unwrap_or(event.midi_float)
-        };
+        let class = self.classify(event, &evidence);
+        let display_midi = self.display_midi(event, &evidence, class);
         CanonicalSungNote {
             event_ids: vec![event.id],
             start: event.start,
@@ -173,7 +158,39 @@ impl CanonicalNotePostProcessor {
         }
     }
 
-    fn consolidate(&self, mut notes: Vec<CanonicalSungNote>) -> Vec<CanonicalSungNote> {
+    fn classify(&self, event: &MusicalNoteEvent, evidence: &NoteEvidence) -> SungNoteClass {
+        let delta = evidence.pitch_delta_cents.unwrap_or(f32::INFINITY).abs();
+        if evidence.fcpe_frame_count == 0
+            || evidence.voiced_coverage < 0.20
+            || delta > self.maximum_pitch_delta_cents
+            || evidence.support_score < self.minimum_support
+        {
+            SungNoteClass::Uncertain
+        } else if event.duration() < 0.10 {
+            SungNoteClass::Ornament
+        } else {
+            SungNoteClass::Stable
+        }
+    }
+
+    fn display_midi(
+        &self,
+        event: &MusicalNoteEvent,
+        evidence: &NoteEvidence,
+        class: SungNoteClass,
+    ) -> f32 {
+        if class == SungNoteClass::Uncertain {
+            event.midi_float
+        } else {
+            evidence.median_midi.unwrap_or(event.midi_float)
+        }
+    }
+
+    fn consolidate(
+        &self,
+        mut notes: Vec<CanonicalSungNote>,
+        track: &PitchTrack,
+    ) -> Vec<CanonicalSungNote> {
         if notes.len() < 2 {
             return notes;
         }
@@ -190,32 +207,44 @@ impl CanonicalNotePostProcessor {
                 && (next.end - next.start) <= typical * 1.15;
             if current.end + merge_gap >= next.start && (same_note || vibrato_fragment) {
                 merge_into(&mut current, next);
+                // Re-measure the merged acoustic window. In particular, a
+                // short uncertain fragment must not poison a longer stable
+                // same-pitch platform merely because it was merged into it.
+                self.refresh_merged_candidate(&mut current, track);
             } else {
-                current.class = classify_transition(current.class, current.display_midi, &output);
                 output.push(current);
                 current = next;
             }
         }
-        current.class = classify_transition(current.class, current.display_midi, &output);
         output.push(current);
         output
     }
-}
 
-fn classify_transition(
-    class: SungNoteClass,
-    current_midi: f32,
-    previous: &[CanonicalSungNote],
-) -> SungNoteClass {
-    if class == SungNoteClass::Stable
-        && previous.last().is_some_and(|previous| {
-            previous.class != SungNoteClass::Uncertain
-                && (previous.display_midi.round() - current_midi.round()).abs() >= 1.0
-        })
-    {
-        SungNoteClass::Transition
-    } else {
-        class
+    fn refresh_merged_candidate(&self, note: &mut CanonicalSungNote, track: &PitchTrack) {
+        let event = MusicalNoteEvent {
+            id: note.event_ids.first().copied().unwrap_or_default(),
+            start: note.start,
+            end: note.end,
+            midi_float: note.game_midi,
+            midi_rounded: note.game_midi.round() as i32,
+            note_name: crate::models::midi_to_note_name(note.game_midi),
+            confidence: 0.0,
+            source: MusicalNoteSource::Game,
+            model_confidence: None,
+            boundary_confidence: None,
+            is_slur: None,
+            evidence: None,
+            class: None,
+        };
+        let evidence = self.measure(&event, track);
+        let class = self.classify(&event, &evidence);
+        note.fcpe_median_midi = evidence.median_midi;
+        note.display_midi = self.display_midi(&event, &evidence, class);
+        note.voiced_coverage = evidence.voiced_coverage;
+        note.fcpe_support = evidence.support_score;
+        note.confidence = evidence.support_score;
+        note.class = class;
+        note.evidence = evidence;
     }
 }
 
@@ -226,37 +255,6 @@ fn merge_into(left: &mut CanonicalSungNote, right: CanonicalSungNote) {
     left.end = left.end.max(right.end);
     left.event_ids.extend(right.event_ids);
     left.game_midi = (left.game_midi * left_duration + right.game_midi * right_duration) / total;
-    left.display_midi =
-        (left.display_midi * left_duration + right.display_midi * right_duration) / total;
-    left.fcpe_median_midi = match (left.fcpe_median_midi, right.fcpe_median_midi) {
-        (Some(a), Some(b)) => Some((a * left_duration + b * right_duration) / total),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    };
-    left.voiced_coverage =
-        (left.voiced_coverage * left_duration + right.voiced_coverage * right_duration) / total;
-    left.fcpe_support =
-        (left.fcpe_support * left_duration + right.fcpe_support * right_duration) / total;
-    left.confidence = (left.confidence * left_duration + right.confidence * right_duration) / total;
-    left.class =
-        if left.class == SungNoteClass::Uncertain || right.class == SungNoteClass::Uncertain {
-            SungNoteClass::Uncertain
-        } else {
-            SungNoteClass::Stable
-        };
-    left.evidence.fcpe_frame_count += right.evidence.fcpe_frame_count;
-    left.evidence.voiced_coverage = left.voiced_coverage;
-    left.evidence.median_midi = left.fcpe_median_midi;
-    left.evidence.midi_mad_cents =
-        match (left.evidence.midi_mad_cents, right.evidence.midi_mad_cents) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        };
-    left.evidence.pitch_delta_cents = left.fcpe_median_midi.map(|m| (m - left.game_midi) * 100.0);
-    left.evidence.support_score = left.fcpe_support;
 }
 
 fn infer_hop(times: &[f32]) -> f32 {

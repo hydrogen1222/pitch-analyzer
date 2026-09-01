@@ -56,12 +56,12 @@ export class PitchCanvas {
     let min = Infinity;
     let max = -Infinity;
     for (const m of this.track.midis) {
-      if (isFinite(m)) {
+      if (typeof m === "number" && Number.isFinite(m)) {
         if (m < min) min = m;
         if (m > max) max = m;
       }
     }
-    if (!isFinite(min) || !isFinite(max)) {
+    if (!Number.isFinite(min) || !Number.isFinite(max)) {
       min = 40;
       max = 80;
     }
@@ -195,7 +195,7 @@ export class PitchCanvas {
     if (!this.track || this.track.times.length === 0) return;
 
     const duration = this.track.times[this.track.times.length - 1];
-    if (!isFinite(duration) || duration <= 0) return;
+    if (!Number.isFinite(duration) || duration <= 0) return;
     const midiRange = Math.max(1, this.viewMaxMidi - this.viewMinMidi);
 
     // First pass: draw the connecting lines
@@ -208,9 +208,7 @@ export class PitchCanvas {
       const t = this.track.times[i];
       const m = this.track.midis[i];
       const px = x + (t / duration) * w;
-      const py = y + h * (1 - (m - this.viewMinMidi) / midiRange);
-
-      if (!isFinite(m)) {
+      if (typeof m !== "number" || !Number.isFinite(m)) {
         if (lineStarted) {
           ctx.stroke();
           ctx.beginPath();
@@ -218,6 +216,7 @@ export class PitchCanvas {
         }
         continue;
       }
+      const py = y + h * (1 - (m - this.viewMinMidi) / midiRange);
 
       if (!lineStarted) {
         ctx.moveTo(px, py);
@@ -237,7 +236,7 @@ export class PitchCanvas {
     for (let i = 0; i < this.track.times.length; i += dotStep) {
       const t = this.track.times[i];
       const m = this.track.midis[i];
-      if (!isFinite(m)) continue;
+      if (typeof m !== "number" || !Number.isFinite(m)) continue;
 
       const px = x + (t / duration) * w;
       const py = y + h * (1 - (m - this.viewMinMidi) / midiRange);
@@ -251,7 +250,7 @@ export class PitchCanvas {
     const ctx = this.ctx;
     if (!this.track || this.track.times.length === 0) return;
     const duration = this.track.times[this.track.times.length - 1];
-    if (!isFinite(duration) || duration <= 0) return;
+    if (!Number.isFinite(duration) || duration <= 0) return;
     const px = (time / duration) * rect.w;
 
     ctx.strokeStyle = "#ff5252";
@@ -265,7 +264,7 @@ export class PitchCanvas {
   timeToPixel(time: number): number {
     if (!this.track || this.track.times.length === 0) return 0;
     const duration = this.track.times[this.track.times.length - 1];
-    if (!isFinite(duration) || duration <= 0) return 0;
+    if (!Number.isFinite(duration) || duration <= 0) return 0;
     const rect = this.canvas.getBoundingClientRect();
     return (time / duration) * rect.width;
   }
@@ -273,7 +272,7 @@ export class PitchCanvas {
   pixelToTime(px: number): number {
     if (!this.track || this.track.times.length === 0) return 0;
     const duration = this.track.times[this.track.times.length - 1];
-    if (!isFinite(duration) || duration <= 0) return 0;
+    if (!Number.isFinite(duration) || duration <= 0) return 0;
     const rect = this.canvas.getBoundingClientRect();
     return (px / rect.width) * duration;
   }
