@@ -25,7 +25,6 @@ dist-ssr
 
 # Rust/Tauri
 src-tauri/target/
-src-tauri/Cargo.lock
 
 # Models (large files, not checked into git)
 models/*.onnx
