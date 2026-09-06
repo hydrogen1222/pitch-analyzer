@@ -37,6 +37,11 @@ export class KaraokeDisplay {
   /// Debug Overlay: 点击 token 时的回调 (line 下标, token 下标)
   onTokenDebug: ((lineIdx: number, tokenIdx: number) => void) | null = null;
 
+  /// Round4 Commit 11: 中文行可选拼音行 (用户可关闭)
+  showPinyin: boolean = true;
+  /// Round4 Commit 11: 当前实际对齐后端标签 (来自 get_alignment_status)
+  alignmentBackendLabel: string = "";
+
   // 渲染缓存: 内容无变化时每帧只更新 MIDI 小字, 不重建整个 DOM
   private lyricsVersion: number = 0;
   private renderedKey: string = "";
@@ -273,6 +278,22 @@ export class KaraokeDisplay {
         noteBox.appendChild(noteEl);
       }
 
+      // Round4 §16.2/16.3: 无正式 badge 时显示明确的不可信符号,
+      // 不留空白让用户误以为是 bug, 也不伪造音名
+      if (this.displayMode !== "debug-raw" && noteBox.childElementCount === 0) {
+        const reason = group?.unpitched_reason ?? leadToken.unpitched_reason;
+        const symbol = this.unpitchedSymbol(reason);
+        if (symbol) {
+          const placeholder = document.createElement("span");
+          placeholder.textContent = symbol;
+          placeholder.title = this.unpitchedTitle(reason);
+          placeholder.style.color = symbol === "?" ? "rgba(255, 210, 90, 0.55)" : "rgba(200, 200, 200, 0.35)";
+          placeholder.style.fontWeight = "700";
+          placeholder.style.fontSize = `${Math.max(10, Math.floor(this.lyricFontSize * 0.5))}px`;
+          noteBox.appendChild(placeholder);
+        }
+      }
+
       notesRow.appendChild(noteBox);
 
       const groupLyrics = document.createElement("span");
@@ -339,16 +360,52 @@ export class KaraokeDisplay {
       wrap.appendChild(transEl);
     }
 
+    // Round4 §16.4: 中文行可选拼音行 (group.reading 为每字拼音; 用户可关闭)
+    if (line.language === "Mandarin" && this.showPinyin) {
+      const pinyinRow = document.createElement("div");
+      pinyinRow.style.display = "flex";
+      pinyinRow.style.justifyContent = "center";
+      pinyinRow.style.whiteSpace = "nowrap";
+      pinyinRow.style.marginTop = "2px";
+      const pinyinEntries = groups
+        .filter(({ group }) => group?.reading)
+        .map(({ group, tokenIndices }) => ({ group: group!, tokenIndices }));
+      if (pinyinEntries.length > 0) {
+        for (const { group } of pinyinEntries) {
+          const pinyinEl = document.createElement("span");
+          pinyinEl.style.minWidth = `${Math.ceil([...group!.reading].length * this.lyricFontSize * 0.62)}px`;
+          pinyinEl.style.textAlign = "center";
+          pinyinEl.style.fontSize = `${Math.max(10, Math.floor(this.lyricFontSize * 0.55))}px`;
+          pinyinEl.style.color = "#8fb8a8";
+          pinyinEl.textContent = group!.reading;
+          pinyinRow.appendChild(pinyinEl);
+        }
+        wrap.appendChild(pinyinRow);
+      }
+    }
+
     const bottomRightInfo = document.createElement("div");
     bottomRightInfo.style.position = "absolute";
     bottomRightInfo.style.bottom = "16px";
     bottomRightInfo.style.right = "20px";
     bottomRightInfo.style.fontSize = "11px";
     bottomRightInfo.style.color = "#888";
-    this.midiInfoEl = bottomRightInfo;
+    bottomRightInfo.style.textAlign = "right";
+    this.displayEl.appendChild(bottomRightInfo);
+    // Round4 §16: backend 标签让用户看到实际对齐来源/回退状态
+    // (midi 读数每帧覆盖自身容器的 textContent, 因此两者用独立子容器)
+    if (this.alignmentBackendLabel) {
+      const backendEl = document.createElement("div");
+      backendEl.style.fontSize = "10px";
+      backendEl.style.color = "#777";
+      backendEl.textContent = this.alignmentBackendLabel;
+      bottomRightInfo.appendChild(backendEl);
+    }
+    const midiText = document.createElement("div");
+    bottomRightInfo.appendChild(midiText);
+    this.midiInfoEl = midiText;
 
     this.displayEl.appendChild(wrap);
-    this.displayEl.appendChild(bottomRightInfo);
   }
 
   // 与后端 select_primary_note 一致的评分回退: duration × confidence
@@ -363,6 +420,46 @@ export class KaraokeDisplay {
       }
     }
     return best;
+  }
+
+  /// Round4 §16.2/16.3: 无音高时的显式符号 (不空白、不伪造):
+  ///   — 物理无音高 (促音/无声化/无发声)
+  ///   ◦ 仅视觉时间 (WeightedFallback)
+  ///   ?  低可信/缺失 (对齐缺失、无重叠、双模型不一致、歧义)
+  private unpitchedSymbol(reason: string | null | undefined): string | null {
+    switch (reason) {
+      case "NonPitchBearing":
+      case "NoVoicing":
+        return "—";
+      case "VisualTimingOnly":
+        return "◦";
+      case "AlignmentMissing":
+      case "NoOverlappingNote":
+      case "LowPitchConfidence":
+      case "AmbiguousMusicalNote":
+      case "LowCrossModelAgreement":
+      case "GameUnsupportedByFcpe":
+      case "AlignmentLowConfidence":
+        return "?";
+      default:
+        return null;
+    }
+  }
+
+  private unpitchedTitle(reason: string | null | undefined): string {
+    const titles: Record<string, string> = {
+      NonPitchBearing: "非 pitch-bearing 单位 (促音/标点)",
+      NoVoicing: "该时间窗内无发声",
+      VisualTimingOnly: "时间仅用于卡拉OK视觉 (WeightedFallback)",
+      AlignmentMissing: "对齐缺失",
+      NoOverlappingNote: "核内无真实重叠的音符",
+      LowPitchConfidence: "发声但置信度不足",
+      AmbiguousMusicalNote: "多个音符均可能 (歧义)",
+      LowCrossModelAgreement: "GAME 与 FCPE 不一致",
+      GameUnsupportedByFcpe: "GAME 区域缺乏 FCPE 支持",
+      AlignmentLowConfidence: "声学对齐可信度不足",
+    };
+    return reason ? titles[reason] ?? reason : "";
   }
 
   private formatMusicalDetail(notes: PitchNote[]): string {

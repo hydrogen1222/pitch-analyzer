@@ -643,6 +643,33 @@ fn get_project_language(app_state: tauri::State<AppState>) -> Result<ProjectLang
     Ok(*app_state.project_language.lock().unwrap())
 }
 
+/// 查询对齐后端与语言状态 (Round4 Commit 11: UI 必须显示实际 backend/fallback)
+#[tauri::command]
+fn get_alignment_status(
+    app_state: tauri::State<AppState>,
+) -> Result<serde_json::Value, String> {
+    let backend = app_state
+        .forced_align
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|fa| fa.name().to_string())
+        .unwrap_or_else(|| "MoraDP/WeightedFallback".to_string());
+    let manager = app_state
+        .alignment_manager
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|m| m.choice().clone());
+    let fallback_warning = app_state.forced_align.lock().unwrap().is_none();
+    Ok(serde_json::json!({
+        "backend": backend,
+        "manager_choice": manager.map(|m| format!("{:?}", m)),
+        "fallback_warning": fallback_warning,
+        "project_language": *app_state.project_language.lock().unwrap(),
+    }))
+}
+
 /// 解析当前歌曲语言 (Round4 Commit 3): 工程设置优先;
 /// Auto 时从已加载歌词检测主导语言; Mixed/无法判定 → Unknown (universal id 0)。
 fn resolve_song_language(app_state: &tauri::State<AppState>) -> crate::models::SingingLanguage {
@@ -1000,6 +1027,7 @@ pub fn run() {
             clear_lyrics,
             set_project_language,
             get_project_language,
+            get_alignment_status,
             playback_play,
             playback_pause,
             playback_seek,

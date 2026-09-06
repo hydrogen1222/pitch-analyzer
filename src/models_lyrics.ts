@@ -7,6 +7,26 @@ export interface NoteBinding {
   score: number;
 }
 
+/** Round4 v4: 核内 F0 稳健统计 (§13.2) */
+export interface F0Summary {
+  voiced_coverage: number;
+  median_midi?: number | null;
+  mad_cents?: number | null;
+  p10_midi?: number | null;
+  p90_midi?: number | null;
+  slope_cents_per_sec?: number | null;
+}
+
+/** Round4 v4: LyricNoteMatcher v2 输出 (按 pronunciation unit) */
+export interface PitchAttachment {
+  pronunciation_unit_id: number;
+  nucleus_span?: [number, number] | null;
+  note_ids: number[];
+  primary_note_id?: number | null;
+  f0_summary?: F0Summary | null;
+  status: string;
+}
+
 export interface ReadingSpan {
   surface: string;
   reading: string;
@@ -104,4 +124,10 @@ export interface LyricLine {
   reading_spans?: ReadingSpan[];
   reading_display_groups?: ReadingDisplayGroup[];
   moras?: MoraUnit[];
+  /** Round4 Commit 7: Mandarin 读音用户覆盖 (char 区间 -> pinyin) */
+  mandarin_overrides?: Array<{ char_start: number; char_end: number; pinyin: string }>;
+  /** Round4: 行级已解析语言 ("Japanese" / "Mandarin" / "Unknown"); 旧工程为 null */
+  language?: string | null;
+  /** Round4 Commit 9: LyricNoteMatcher v2 输出 (与行 mora 序对齐) */
+  pitch_attachments?: PitchAttachment[];
 }

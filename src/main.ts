@@ -15,6 +15,7 @@ let state = {
   currentTime: 0,
   isPlaying: false,
   duration: 0,
+  lyricsPath: null as string | null,
 };
 
 let pitchCanvasEl: HTMLCanvasElement | null;
@@ -62,6 +63,36 @@ function getCurrentParams(): AnalysisParams {
     quantize: false,
     min_note_duration_ms: 45,
   };
+}
+
+/// Round4 Commit 11: UI 必须显示实际对齐后端与回退状态 (P0-3)
+async function refreshAlignmentStatus() {
+  const statusDiv = document.querySelector("#alignment-status") as HTMLElement | null;
+  try {
+    const info = (await invoke("get_alignment_status")) as {
+      backend: string;
+      manager_choice: string | null;
+      fallback_warning: boolean;
+      project_language: string;
+    };
+    const label = info.fallback_warning
+      ? `对齐后端: ${info.backend} (启发式回退, 无 FA 后端)`
+      : `对齐后端: ${info.backend}`;
+    if (statusDiv) {
+      statusDiv.textContent = label;
+      statusDiv.style.color = info.fallback_warning ? "#c8a25a" : "#6a7a76";
+    }
+    if (karaokeDisplay) {
+      karaokeDisplay.alignmentBackendLabel = info.fallback_warning
+        ? `${info.backend} · heuristic`
+        : info.backend;
+    }
+    return info;
+  } catch (e) {
+    console.error("get_alignment_status failed:", e);
+    if (statusDiv) statusDiv.textContent = "对齐后端: 未知";
+    return null;
+  }
 }
 
 function setStatus(text: string) {
@@ -206,6 +237,7 @@ async function doImportAudio() {
     if (pitchCanvas) { pitchCanvas.setTrack(track); pitchCanvas.setTime(0); }
     enableControls(true);
     setStatus(`分析完成 (时长: ${formatTime(state.duration)})`);
+    await refreshAlignmentStatus();
   } catch (e) {
     console.error("Import audio failed:", e);
     setStatus("分析失败");
@@ -230,6 +262,7 @@ async function doImportLrc() {
     if (!selected) return;
 
     const lines = (await invoke("load_lyrics_lrc", { path: selected })) as LyricLine[];
+    state.lyricsPath = selected;
     state.lyrics = lines;
     if (karaokeDisplay) karaokeDisplay.setLyrics(lines);
     if (clearLyricsBtn) clearLyricsBtn.disabled = lines.length === 0;
@@ -253,6 +286,7 @@ async function doImportTxt() {
     if (!selected) return;
 
     const lines = (await invoke("load_lyrics_txt", { path: selected })) as LyricLine[];
+    state.lyricsPath = selected;
     state.lyrics = lines;
     if (karaokeDisplay) karaokeDisplay.setLyrics(lines);
     if (clearLyricsBtn) clearLyricsBtn.disabled = lines.length === 0;
@@ -367,6 +401,7 @@ async function initApp() {
     isAnalyzerInitialized = false;
     setStatus("未载入音高模型 (点击选择)");
   }
+  await refreshAlignmentStatus();
 
   try {
     await listen("analysis-progress", (event: any) => {
@@ -398,6 +433,8 @@ async function initApp() {
   exportSrtBtn = document.querySelector("#export-srt");
   exportAssBtn = document.querySelector("#export-ass");
   const pitchDisplayModeInput = document.querySelector("#pitch-display-mode") as HTMLSelectElement | null;
+  const languageSelect = document.querySelector("#language-select") as HTMLSelectElement | null;
+  const showPinyinInput = document.querySelector("#show-pinyin") as HTMLInputElement | null;
   pitchFontInput = document.querySelector("#font-pitch");
   lyricFontInput = document.querySelector("#font-lyric");
   selectModelBtn = document.querySelector("#select-model");
@@ -474,6 +511,37 @@ async function initApp() {
     }
   });
 
+  // ── Round4 Commit 11: 工程语言选择 + 拼音显示开关 ──
+  languageSelect?.addEventListener("change", async () => {
+    try {
+      await invoke("set_project_language", { language: languageSelect.value });
+      if (karaokeDisplay) karaokeDisplay.render();
+      if (state.lyricsPath) {
+        // 语言变更后重新载入当前歌词文件, 路由立即生效
+        const isLrc = state.lyricsPath.toLowerCase().endsWith(".lrc");
+        const lines = (await invoke(isLrc ? "load_lyrics_lrc" : "load_lyrics_txt", {
+          path: state.lyricsPath,
+        })) as LyricLine[];
+        state.lyrics = lines;
+        if (karaokeDisplay) karaokeDisplay.setLyrics(lines);
+        setStatus(`已按 ${languageSelect.value} 语言重新载入歌词`);
+      } else {
+        setStatus(`语言已设为 ${languageSelect.value} (载入歌词时生效)`);
+      }
+      await refreshAlignmentStatus();
+    } catch (e) {
+      console.error("set_project_language failed:", e);
+      await message("语言设置失败: " + e, { title: "错误", kind: "error" });
+    }
+  });
+
+  showPinyinInput?.addEventListener("change", () => {
+    if (karaokeDisplay) {
+      karaokeDisplay.showPinyin = showPinyinInput.checked;
+      karaokeDisplay.render();
+    }
+  });
+
   // ── Debug Overlay (任务书 E1): 点击 token 显示分层定位信息 ──
   const debugPanel = document.querySelector("#debug-panel") as HTMLElement | null;
   const debugContent = document.querySelector("#debug-content") as HTMLElement | null;
@@ -506,6 +574,8 @@ async function initApp() {
     if (!token) return;
     const lines: string[] = [];
     lines.push(`Surface: ${token.text}`);
+    lines.push(`Language: ${line.language ?? "(未判定)"}`);
+    lines.push(`Alignment backend: ${karaokeDisplay?.alignmentBackendLabel ?? "?"}`);
     const spans = (token.reading_span_ids ?? []).map((si) => line.reading_spans?.[si]).filter(Boolean);
     for (const sp of spans) {
       const ruby = (line.ruby_annotations ?? []).find((annotation) =>
@@ -558,6 +628,29 @@ async function initApp() {
       lines.push(`Notes: (无正式绑定)`);
     }
     lines.push(`Unpitched reason: ${token.unpitched_reason ?? "-"}`);
+    // Round4 §17: v4 pitch attachments (per pronunciation unit)
+    const attachments = line.pitch_attachments ?? [];
+    if (attachments.length > 0) {
+      const moraIds = new Set<number>();
+      for (const group of groups) {
+        for (let mi = group!.mora_start; mi < group!.mora_end; mi++) moraIds.add(mi);
+      }
+      const relevant = attachments.filter((a) =>
+        moraIds.size > 0 ? moraIds.has(a.pronunciation_unit_id) : true,
+      );
+      for (const a of relevant) {
+        const unit = (line.moras ?? [])[a.pronunciation_unit_id];
+        const f0 = a.f0_summary;
+        lines.push(
+          `Attachment [${unit?.kana ?? a.pronunciation_unit_id}]: status=${a.status} notes=[${a.note_ids.join(",")}] primary=${a.primary_note_id ?? "-"} nucleus=${a.nucleus_span ? a.nucleus_span.map((v) => v.toFixed(3)).join("-") : "-"}`,
+        );
+        if (f0) {
+          lines.push(
+            `  F0: coverage=${f0.voiced_coverage.toFixed(2)} median=${f0.median_midi?.toFixed(2) ?? "-"} MAD=${f0.mad_cents?.toFixed(0) ?? "-"}c P10/P90=${f0.p10_midi?.toFixed(1) ?? "-"}/${f0.p90_midi?.toFixed(1) ?? "-"}`,
+          );
+        }
+      }
+    }
     lines.push(`Note engine: ${state.track?.musical_note_source ?? "LegacyFcpeTracker"} / ${state.track?.musical_note_model ?? "legacy-notetracker"}`);
     lines.push(`Tracker: v${state.track?.note_events?.[0]?.tracker_version ?? "?"}`);
     const canonical = state.track?.canonical_sung_notes ?? [];
