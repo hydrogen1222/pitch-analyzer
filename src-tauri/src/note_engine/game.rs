@@ -203,6 +203,63 @@ impl GameModelPaths {
     }
 }
 
+/// Chunking 配置 (Round4 Commit 10, P1-5): 数值不写死在函数里,
+/// 可通过模型 config.json 的 "chunking" 对象覆盖。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GameChunkingConfig {
+    /// 单 chunk 的核心区上限 (秒); 建议先 benchmark 18-20s
+    pub max_core_secs: f32,
+    /// 相邻 chunk 的 context 重叠 (秒)
+    pub overlap_secs: f32,
+    /// 静音判定 RMS 阈值
+    pub silence_threshold: f32,
+    /// 最短静音段 (秒), 优先在此类位置切块
+    pub min_silence_secs: f32,
+    /// 跨块 reconcile: 同音高事件间隙 <= 该值合并 (同一持续音被边界切开)
+    pub reconcile_gap_secs: f32,
+}
+
+impl Default for GameChunkingConfig {
+    fn default() -> Self {
+        Self {
+            max_core_secs: 20.0,
+            overlap_secs: 1.0,
+            silence_threshold: 0.02,
+            min_silence_secs: 0.2,
+            reconcile_gap_secs: 0.05,
+        }
+    }
+}
+
+impl GameChunkingConfig {
+    fn from_json(v: &serde_json::Value) -> Self {
+        let get = |key: &str, fallback: f32| -> f32 {
+            v.get("chunking")
+                .and_then(|c| c.get(key))
+                .and_then(|x| x.as_f64())
+                .map(|x| x as f32)
+                .unwrap_or(fallback)
+        };
+        Self {
+            max_core_secs: get("max_core_secs", 20.0),
+            overlap_secs: get("overlap_secs", 1.0),
+            silence_threshold: get("silence_threshold", 0.02),
+            min_silence_secs: get("min_silence_secs", 0.2),
+            reconcile_gap_secs: get("reconcile_gap_secs", 0.05),
+        }
+    }
+}
+
+/// 一个推理块: [context_start | core_start .. core_end | context_end] (采样点)。
+/// 推理覆盖 context; note 起始边界只承认 core 内的。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChunkSpan {
+    pub context_start: usize,
+    pub core_start: usize,
+    pub core_end: usize,
+    pub context_end: usize,
+}
+
 /// config.json (缺省值与官方 game-infer 一致)。
 /// `languages` 是模型包自带的 id 映射 (官方 ONNX.md: en/ja/zh → 数字),
 /// 不同模型包映射可能不同, 必须动态读取, 禁止硬编码 ja=2 / zh=3。
@@ -214,6 +271,7 @@ struct GameConfig {
     seg_radius_seconds: f32,
     est_threshold: f32,
     languages: HashMap<String, i64>,
+    chunking: GameChunkingConfig,
 }
 
 impl GameConfig {
@@ -246,6 +304,7 @@ impl GameConfig {
                 .and_then(|x| x.as_f64())
                 .unwrap_or(0.2) as f32,
             languages,
+            chunking: GameChunkingConfig::from_json(v),
         }
     }
 
@@ -602,64 +661,142 @@ impl GameNoteEngine {
         })
     }
 
-    /// 静音切片 (官方 Game::get_midi 的 Slicer 语义简化实现):
-    /// 长音频在低能量处切开, 避免 D3PM/estimator 处理超长序列
-    fn slice(audio: &[f32], sample_rate: u32) -> Vec<(usize, usize)> {
+    /// Overlap 切块规划 (Round4 Commit 10, P1-5):
+    /// 优先在静音处切; 无静音可用时才硬切 max_core。
+    /// 每个 chunk 带 [context | core | context] 结构:
+    /// 推理跑整个 context, 但 note 只在 core 内拥有起始边界 ——
+    /// 左/右 context 中的边界由相邻 chunk 负责 (丢弃边缘低可信边界),
+    /// 跨块同一持续音由 reconcile 合并。
+    fn plan_chunks(audio: &[f32], sample_rate: u32, cfg: &GameChunkingConfig) -> Vec<ChunkSpan> {
         let sr = sample_rate as usize;
-        let hop = (sr / 100).max(1); // 10ms
-        let threshold = 0.02f32;
-        let max_chunk = sr * 20;
-        let min_silence = sr / 5; // 200ms
-        let min_chunk = sr / 2; // 500ms
+        let hop = (sr / 100).max(1);
+        let max_core = ((cfg.max_core_secs * sr as f32) as usize).max(hop);
+        let overlap = (cfg.overlap_secs * sr as f32) as usize;
+        let min_silence = (cfg.min_silence_secs * sr as f32) as usize;
+        let min_chunk = (sr / 2).max(1);
+        let audio_len = audio.len();
+        if audio_len == 0 {
+            return Vec::new();
+        }
 
-        let n_frames = audio.len().div_ceil(hop);
+        let n_frames = audio_len.div_ceil(hop);
         let rms: Vec<f32> = (0..n_frames)
             .map(|ri| {
                 let i = ri * hop;
-                let end = (i + hop).min(audio.len());
+                let end = (i + hop).min(audio_len);
                 let n = (end - i).max(1);
                 let s: f32 = audio[i..end].iter().map(|x| x * x).sum();
                 (s / n as f32).sqrt()
             })
             .collect();
 
-        let mut chunks: Vec<(usize, usize)> = Vec::new();
-        let mut chunk_start = 0usize;
+        let mut cuts: Vec<usize> = vec![0];
+        let mut current = 0usize;
+        while audio_len - current > max_core {
+            let upper = (current + max_core).min(audio_len);
+            let search_from = current + min_chunk;
+            // 静音优先: 在 (current+min_chunk, upper] 内找最后一个静音中心
+            let cut = Self::last_silence_center(&rms, hop, search_from, upper, min_silence, cfg)
+                .filter(|&c| c - current >= min_chunk && audio_len - c >= min_chunk / 4)
+                .unwrap_or(upper);
+            cuts.push(cut);
+            current = cut;
+        }
+        cuts.push(audio_len);
+
+        let mut chunks = Vec::with_capacity(cuts.len() - 1);
+        for window in cuts.windows(2) {
+            let core_start = window[0];
+            let core_end = window[1];
+            let context_start = if core_start == 0 {
+                0
+            } else {
+                core_start.saturating_sub(overlap)
+            };
+            let context_end = if core_end == audio_len {
+                audio_len
+            } else {
+                (core_end + overlap).min(audio_len)
+            };
+            chunks.push(ChunkSpan {
+                context_start,
+                core_start,
+                core_end,
+                context_end,
+            });
+        }
+        chunks
+    }
+
+    /// 在 [from, to) 帧范围内寻找最后一个 >= min_silence 的静音段中心
+    fn last_silence_center(
+        rms: &[f32],
+        hop: usize,
+        from: usize,
+        to: usize,
+        min_silence: usize,
+        cfg: &GameChunkingConfig,
+    ) -> Option<usize> {
         let mut silence_run = 0usize;
-        let mut silence_center: Option<usize> = None;
+        let mut last_center: Option<usize> = None;
         for (ri, &r) in rms.iter().enumerate() {
-            let pos = ((ri + 1) * hop).min(audio.len());
-            if r < threshold {
+            let pos = ((ri + 1) * hop).min(to.max(1));
+            if pos <= from {
+                if r < cfg.silence_threshold {
+                    continue; // 起点之前的静音不计入本段
+                }
+                silence_run = 0;
+                continue;
+            }
+            if r < cfg.silence_threshold {
                 silence_run += hop;
-                if silence_center.is_none() && silence_run >= min_silence / 2 {
-                    silence_center = Some(pos);
+                if silence_run >= min_silence {
+                    let center = pos.saturating_sub(silence_run / 2);
+                    if center > from && center < to {
+                        last_center = Some(center);
+                    }
                 }
             } else {
                 silence_run = 0;
-                silence_center = None;
             }
-            let chunk_len = pos - chunk_start;
-            if chunk_len >= min_chunk && silence_run >= min_silence {
-                if let Some(c) = silence_center {
-                    if c - chunk_start >= min_chunk && audio.len() - c >= min_chunk / 4 {
-                        chunks.push((chunk_start, c));
-                        chunk_start = c;
-                        silence_run = 0;
-                        silence_center = None;
-                    }
+            if pos >= to {
+                break;
+            }
+        }
+        last_center
+    }
+
+    /// 跨块 reconcile (Round4 Commit 10): 相邻同音高且间隙极小的
+    /// 事件合并 (同一持续音被 chunk 边界切开的情况)。
+    fn reconcile_chunk_notes(
+        mut events: Vec<MusicalNoteEvent>,
+        merge_gap_secs: f32,
+    ) -> Vec<MusicalNoteEvent> {
+        events.sort_by(|a, b| {
+            a.start
+                .partial_cmp(&b.start)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut output: Vec<MusicalNoteEvent> = Vec::new();
+        for event in events {
+            if let Some(last) = output.last_mut() {
+                let same_pitch = last.midi_rounded == event.midi_rounded;
+                let contiguous = event.start <= last.end + merge_gap_secs;
+                if same_pitch && contiguous {
+                    last.end = last.end.max(event.end);
+                    // 事件时长加权平均 midi
+                    let l_dur = (last.end - last.start).max(1e-3);
+                    let r_dur = (event.end - event.start).max(1e-3);
+                    last.midi_float =
+                        (last.midi_float * l_dur + event.midi_float * r_dur) / (l_dur + r_dur);
+                    last.midi_rounded = last.midi_float.round() as i32;
+                    last.note_name = midi_to_note_name(last.midi_float);
+                    continue;
                 }
             }
-            if chunk_len >= max_chunk {
-                chunks.push((chunk_start, pos));
-                chunk_start = pos;
-                silence_run = 0;
-                silence_center = None;
-            }
+            output.push(event);
         }
-        if audio.len() - chunk_start >= min_chunk / 4 {
-            chunks.push((chunk_start, audio.len()));
-        }
-        chunks
+        output
     }
 }
 
@@ -674,6 +811,27 @@ fn num_cpus() -> usize {
         .map(|n| n.get())
         .unwrap_or(4)
         .max(1)
+}
+
+impl GameNoteEngine {
+    /// 测试辅助事件 (chunking tests)
+    fn test_event(id: u32, start: f32, end: f32, midi: f32) -> MusicalNoteEvent {
+        MusicalNoteEvent {
+            id,
+            start,
+            end,
+            midi_float: midi,
+            midi_rounded: midi.round() as i32,
+            note_name: midi_to_note_name(midi),
+            confidence: 0.0,
+            source: MusicalNoteSource::Game,
+            model_confidence: None,
+            boundary_confidence: None,
+            is_slur: None,
+            evidence: None,
+            class: None,
+        }
+    }
 }
 
 impl MusicalNoteEngine for GameNoteEngine {
@@ -698,7 +856,9 @@ impl MusicalNoteEngine for GameNoteEngine {
         // P0-2: 语言 id 来自模型 config, 不再硬编码 0
         let language = self.config.language_id(request.language);
 
-        let chunks = Self::slice(&audio, sr);
+        // Round4 Commit 10 (P1-5): overlap 切块规划 (静音优先, 硬切兜底)
+        let chunking = self.config.chunking;
+        let chunks = Self::plan_chunks(&audio, sr, &chunking);
         if chunks.is_empty() {
             return Ok(Vec::new());
         }
@@ -706,18 +866,20 @@ impl MusicalNoteEngine for GameNoteEngine {
         let mut events: Vec<MusicalNoteEvent> = Vec::new();
         let mut next_id: u32 = 0;
 
-        for (c_start, c_end) in &chunks {
-            let wave = &audio[*c_start..*c_end];
+        for chunk in &chunks {
+            let wave = &audio[chunk.context_start..chunk.context_end];
             if wave.len() < (sr / 20) as usize {
                 continue;
             }
-            // Mode B: 外部 boundaries (绝对秒) → chunk 内 known durations (秒)
+            // Mode B: 外部 boundaries (绝对秒) → known durations。
+            // Mode B 语义定义在全曲边界上, 与 chunked ownership 冲突时
+            // 以单 chunk (全曲) 方式处理: 即 context == core == 全曲。
             let known_durations: Option<Vec<f32>> = optional_boundaries.and_then(|bd| {
                 if bd.len() < 2 {
                     return None;
                 }
                 let mut in_chunk: Vec<f32> = Vec::new();
-                let c0 = *c_start as f32 / sr as f32;
+                let c0 = chunk.context_start as f32 / sr as f32;
                 let mut prev = 0.0f32;
                 for &b in bd {
                     let rel = b - c0;
@@ -764,7 +926,11 @@ impl MusicalNoteEngine for GameNoteEngine {
                 .into());
             }
 
-            let mut t = *c_start as f32 / sr as f32;
+            // 事件时间从 context 起点累计; 归属: 起始边界必须在 core 内
+            // (P1-5: 左/右 context 中的边界由相邻 chunk 拥有, 此处丢弃)
+            let core_start_secs = chunk.core_start as f32 / sr as f32;
+            let core_end_secs = chunk.core_end as f32 / sr as f32;
+            let mut t = chunk.context_start as f32 / sr as f32;
             for i in 0..out.durations.len() {
                 if out.mask_n.get(i).copied().unwrap_or(0) == 0 {
                     continue;
@@ -777,7 +943,8 @@ impl MusicalNoteEngine for GameNoteEngine {
                 }
                 let (note_start, note_end) = (t, t + d);
                 t = note_end;
-                if out.presence.get(i).copied().unwrap_or(0.0) > 0.5 {
+                let owns_onset = note_start >= core_start_secs && note_start < core_end_secs;
+                if out.presence.get(i).copied().unwrap_or(0.0) > 0.5 && owns_onset {
                     let midi_f = out.scores.get(i).copied().unwrap_or(60.0);
                     let midi = midi_f.round() as i32;
                     events.push(MusicalNoteEvent {
@@ -804,6 +971,13 @@ impl MusicalNoteEngine for GameNoteEngine {
             }
         }
 
+        // 跨块 reconcile: 同一持续音被 chunk 边界切开 → 合并 (P1-5)
+        let merged = Self::reconcile_chunk_notes(events, chunking.reconcile_gap_secs);
+        let mut events: Vec<MusicalNoteEvent> = Vec::with_capacity(merged.len());
+        for (id, mut event) in merged.into_iter().enumerate() {
+            event.id = id as u32;
+            events.push(event);
+        }
         Ok(events)
     }
 }
@@ -863,5 +1037,113 @@ mod language_config_tests {
         assert!(!config.languages.contains_key("ja"));
         assert!(!config.languages.contains_key("zh"));
         assert_eq!(config.language_id(SingingLanguage::Japanese), 0);
+    }
+}
+
+#[cfg(test)]
+mod chunking_tests {
+    use super::*;
+
+    fn sr() -> u32 {
+        100 // 测试用低采样率: 1 秒 = 100 样本, 10ms hop = 1 样本
+    }
+
+    fn tone(len_secs: f32, amp: f32) -> Vec<f32> {
+        let n = (len_secs * 100.0) as usize;
+        vec![amp; n.max(1)]
+    }
+
+    #[test]
+    fn short_audio_single_chunk_no_context() {
+        let cfg = GameChunkingConfig::default();
+        let audio = tone(5.0, 0.5);
+        let chunks = GameNoteEngine::plan_chunks(&audio, sr(), &cfg);
+        assert_eq!(chunks.len(), 1);
+        let c = chunks[0];
+        assert_eq!((c.context_start, c.core_start), (0, 0));
+        assert_eq!((c.core_end, c.context_end), (audio.len(), audio.len()));
+    }
+
+    /// 长音频: 多 chunk; core 连续; 非 首/末 chunk 有对称 context;
+    /// context 扩展不超过 overlap
+    #[test]
+    fn long_audio_planned_with_overlap_context() {
+        let cfg = GameChunkingConfig {
+            max_core_secs: 2.0,
+            overlap_secs: 0.5,
+            ..Default::default()
+        };
+        let audio = tone(6.0, 0.5); // 3 chunks of 2s
+        let chunks = GameNoteEngine::plan_chunks(&audio, sr(), &cfg);
+        assert_eq!(chunks.len(), 3);
+        // core 连续覆盖
+        assert_eq!(chunks[0].core_start, 0);
+        assert_eq!(chunks[1].core_start, chunks[0].core_end);
+        assert_eq!(chunks[2].core_start, chunks[1].core_end);
+        assert_eq!(chunks[2].core_end, audio.len());
+        // context: 首块无左 context; 中间块左右各 0.5s (50 样本)
+        assert_eq!(chunks[0].context_start, 0);
+        assert_eq!(chunks[1].context_start, chunks[1].core_start - 50);
+        assert_eq!(chunks[1].context_end, chunks[1].core_end + 50);
+        assert_eq!(chunks[2].context_end, audio.len());
+    }
+
+    /// P1-5: 无静音可用时才硬切; 有静音时优先在静音处切
+    #[test]
+    fn silence_preferred_over_hard_cut() {
+        let cfg = GameChunkingConfig {
+            max_core_secs: 2.0,
+            overlap_secs: 0.5,
+            silence_threshold: 0.02,
+            min_silence_secs: 0.2,
+            reconcile_gap_secs: 0.05,
+        };
+        // 1.5s tone + 0.4s silence + 5s tone: 硬切点 2.0s 落在静音段 (1.5-1.9s) 附近
+        let mut audio = tone(1.5, 0.5);
+        audio.extend(vec![0.0; 40]); // 0.4s 静音
+        audio.extend(tone(5.0, 0.5));
+        let chunks = GameNoteEngine::plan_chunks(&audio, sr(), &cfg);
+        assert!(chunks.len() >= 2);
+        // 第一个 cut 应在静音段附近 (1.5-1.9s => 150-190 样本), 而非正好 200
+        let first_cut = chunks[0].core_end;
+        assert!(
+            (150..=200).contains(&first_cut),
+            "cut should land in the silence gap, got {first_cut}"
+        );
+    }
+
+    /// reconcile: 边界两侧同音高事件合并; 不同音高不合并
+    #[test]
+    fn reconcile_merges_split_sustained_notes() {
+        let events = vec![
+            GameNoteEngine::test_event(0, 0.0, 2.0, 60.0),
+            GameNoteEngine::test_event(1, 2.0, 4.0, 60.0), // 同音被切开
+            GameNoteEngine::test_event(2, 4.0, 5.0, 62.0),
+        ];
+        let merged = GameNoteEngine::reconcile_chunk_notes(events, 0.05);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].start, 0.0);
+        assert_eq!(merged[0].end, 4.0);
+        assert_eq!(merged[0].midi_rounded, 60);
+        assert_eq!(merged[1].midi_rounded, 62);
+        // 间隙超过 merge_gap 不合并
+        let events = vec![
+            GameNoteEngine::test_event(0, 0.0, 1.0, 60.0),
+            GameNoteEngine::test_event(1, 1.5, 2.0, 60.0),
+        ];
+        let merged = GameNoteEngine::reconcile_chunk_notes(events, 0.05);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn chunking_config_from_json() {
+        let cfg = GameChunkingConfig::from_json(&serde_json::json!({
+            "chunking": { "max_core_secs": 18.0, "overlap_secs": 1.5 }
+        }));
+        assert_eq!(cfg.max_core_secs, 18.0);
+        assert_eq!(cfg.overlap_secs, 1.5);
+        assert_eq!(cfg.silence_threshold, 0.02); // 缺省
+        let cfg = GameChunkingConfig::from_json(&serde_json::json!({}));
+        assert_eq!(cfg, GameChunkingConfig::default());
     }
 }

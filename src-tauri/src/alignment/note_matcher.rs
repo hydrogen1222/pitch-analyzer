@@ -161,7 +161,6 @@ fn match_one(
         }
         let r_nucleus = (overlap / unit_dur).clamp(0.0, 1.0);
         let r_note = (overlap / note_dur).clamp(0.0, 1.0);
-        let intersection = (s1.min(n1) - s0.max(n0)).max(0.0);
         let coverage = f0.voiced_coverage;
         let agreement = pitch_agreement(track, s0.max(n0), s1.min(n1), note.midi_float, params);
         let score = params.nucleus_overlap_weight * r_nucleus
