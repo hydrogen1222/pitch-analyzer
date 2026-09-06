@@ -1,5 +1,8 @@
 use crate::analyzer::PitchAnalyzer;
-use crate::forced_align::{ForcedAlignBackend, MmsForcedAlignBackend};
+use crate::forced_align::{
+    manager::AlignmentBackendManager, singing_fa::SingingFaBackend, ForcedAlignBackend,
+    MmsForcedAlignBackend,
+};
 use crate::models::{
     AnalysisParams, LyricLine, NoteTrackingParams, PitchTrack, ProjectData, ProjectLanguage,
 };
@@ -41,6 +44,8 @@ struct AppState {
     analysis_params: Mutex<Option<AnalysisParams>>,
     /// 工程语言设置 (Round4 Commit 2, P0-1): 默认 Auto, 用户可显式指定
     project_language: Mutex<ProjectLanguage>,
+    /// 对齐后端管理器 (Round4 Commit 8, P0-3): 记录实际选择的后端
+    alignment_manager: Mutex<Option<crate::forced_align::AlignmentBackendManager>>,
 }
 
 fn find_game_model_dir(app_handle: &tauri::AppHandle, fcpe_model: &Path) -> Option<PathBuf> {
@@ -89,9 +94,12 @@ fn configure_optional_engines(
         });
     *app_state.game_engine.lock().unwrap() = game;
 
+    // Alignment backend manager (Round4 P0-3): singing FA (配置即优先,
+    // runtime 未接入时显式回退) > legacy MMS (persistent worker) > MoraDP。
     // MMS-FA depends on Python + torchaudio and downloads its acoustic weights
     // on first use. It is opt-in so a normal packaged install never spawns a
     // missing interpreter; PITCH_ANALYZER_FA_PYTHON also enables it implicitly.
+    let singing_fa = SingingFaBackend::from_env();
     let fa_enabled = std::env::var("PITCH_ANALYZER_FA_ENABLE").ok().as_deref() == Some("1")
         || std::env::var_os("PITCH_ANALYZER_FA_PYTHON").is_some();
     let fa = if fa_enabled {
@@ -99,11 +107,11 @@ fn configure_optional_engines(
             .path()
             .resource_dir()
             .ok()
-            .map(|dir| dir.join("scripts/forced_align_mms.py"));
+            .map(|dir| dir.join("scripts/legacy_mms_worker.py"));
         match MmsForcedAlignBackend::from_env_with_helper(resource_helper.as_deref()) {
             Ok(backend) => {
                 eprintln!(
-                    "Loaded forced-align backend: {}",
+                    "Loaded forced-align backend (persistent worker): {}",
                     backend.helper_path().display()
                 );
                 Some(backend)
@@ -116,6 +124,17 @@ fn configure_optional_engines(
     } else {
         None
     };
+    let manager = AlignmentBackendManager::resolve(singing_fa.is_some(), fa.is_some());
+    if manager.choice() == &forced_align::manager::BackendChoice::SingingFa {
+        // singing FA runtime 尚未接入: 显式声明依赖缺失, 不冒充可用
+        if let Some(ref backend) = singing_fa {
+            eprintln!(
+                "[alignment-manager] Singing FA model configured at {} but runtime is not integrated (experimental skeleton); legacy backend serves requests",
+                backend.model_dir().display()
+            );
+        }
+    }
+    *app_state.alignment_manager.lock().unwrap() = Some(manager);
     *app_state.forced_align.lock().unwrap() = fa;
 }
 
@@ -960,6 +979,7 @@ pub fn run() {
             audio_path: Mutex::new(None),
             analysis_params: Mutex::new(None),
             project_language: Mutex::new(ProjectLanguage::Auto),
+            alignment_manager: Mutex::new(None),
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
