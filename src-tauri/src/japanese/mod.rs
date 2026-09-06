@@ -10,10 +10,18 @@
 
 pub mod mora;
 pub mod phoneme;
+pub mod pipeline;
+pub mod pitch_policy;
 pub mod reading;
 pub mod unidic;
 
 pub use mora::parse_kana_moras;
+pub use phoneme::{JapanesePhonemizer, PhonemeSpec, RuleBasedPhonemizer};
+pub use pipeline::build_japanese_layers;
+pub use pitch_policy::{
+    classify_phoneme_class, classify_unit_kind, nucleus_phoneme_range, phoneme_pitch_bearing,
+    pitch_bearing_policy,
+};
 pub use reading::{
     parse_ruby_text, ruby_display_offset, JapaneseReadingProvider, KanaOnlyProvider,
     ParsedRubyText, RubyAnnotation, RubyParseError,

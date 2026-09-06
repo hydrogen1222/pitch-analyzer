@@ -103,20 +103,21 @@ impl JapaneseReadingProvider for LinderaUnidicProvider {
             // UniDic can expose the lemma reading for inflected kana tokens
             // (`し` -> `する`, `て` -> `てる`). For an all-kana surface the
             // visible text itself is the exact pronunciation and must win.
+            // 读取产生点统一 NFKC 规范化 (Round4 §8.4: 半角/组合浊音)。
             let pronunciation_str = if surface_is_kana {
-                katakana_to_hiragana(&surface)
+                mora::normalize_kana(&katakana_to_hiragana(&surface))
             } else if raw_pron != "*" && !raw_pron.is_empty() {
-                katakana_to_hiragana(raw_pron)
+                mora::normalize_kana(&katakana_to_hiragana(raw_pron))
             } else if raw_read != "*" && !raw_read.is_empty() {
-                katakana_to_hiragana(raw_read)
+                mora::normalize_kana(&katakana_to_hiragana(raw_read))
             } else {
                 String::new()
             };
 
             let reading_str = if surface_is_kana {
-                katakana_to_hiragana(&surface)
+                mora::normalize_kana(&katakana_to_hiragana(&surface))
             } else if raw_read != "*" && !raw_read.is_empty() {
-                katakana_to_hiragana(raw_read)
+                mora::normalize_kana(&katakana_to_hiragana(raw_read))
             } else if !pronunciation_str.is_empty() {
                 pronunciation_str.clone()
             } else {

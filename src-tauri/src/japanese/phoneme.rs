@@ -5,6 +5,8 @@
 // 促音 (っ=cl)、拨音 (ん=N)、长音符 (ー=:)。
 // 这不是完整的音系同化模型, 但足够作为 forced aligner 的标签序列。
 
+use crate::japanese::mora;
+
 /// 单个假名 (或假名组合) 的辅音部分
 fn consonant_of(base: char) -> Option<&'static str> {
     Some(match base {
@@ -88,18 +90,33 @@ pub fn mora_to_phonemes(kana: &str) -> Vec<String> {
         }
         [base, attach] => {
             // base + 小書き: 拗音 (きゃ = k y a) 或外来音 (ファ = f a, ティ = t i)
-            let Some(cons) = consonant_of(*base) else {
-                return vec![];
-            };
             if let Some(v) = small_vowel(*attach) {
-                if is_y_small_raw(*attach) {
-                    vec![cons.to_string(), "y".to_string(), v.to_string()]
-                } else {
-                    // 外来音直母音: ファ = f a (不加 y)
-                    vec![cons.to_string(), v.to_string()]
+                match consonant_of(*base) {
+                    Some(cons) => {
+                        if is_y_small_raw(*attach) {
+                            vec![cons.to_string(), "y".to_string(), v.to_string()]
+                        } else {
+                            // 外来音直母音: ファ = f a (不加 y)
+                            vec![cons.to_string(), v.to_string()]
+                        }
+                    }
+                    None => {
+                        // 母音底 + 小書き (ウェ/ウォ 等): う行底用 w 起音,
+                        // 其余 (ぁ行底) 退化为单母音核
+                        if *base == 'う' || *base == 'ヴ' {
+                            vec!["w".to_string(), v.to_string()]
+                        } else {
+                            vec![v.to_string()]
+                        }
+                    }
                 }
             } else {
-                vec![cons.to_string(), vowel_of(*base).unwrap_or("u").to_string()]
+                match consonant_of(*base) {
+                    Some(cons) => {
+                        vec![cons.to_string(), vowel_of(*base).unwrap_or("u").to_string()]
+                    }
+                    None => single_kana_phonemes(*base),
+                }
             }
         }
         _ => vec![],
@@ -119,6 +136,52 @@ fn single_kana_phonemes(c: char) -> Vec<String> {
         (Some(cons), Some(v)) => vec![cons.to_string(), v.to_string()],
         (None, Some(v)) => vec![v.to_string()],
         _ => vec![],
+    }
+}
+
+// ── Phonemizer abstraction (Round4 任务书 §8.5) ────────────────────
+//
+// 核心 alignment 不得依赖当前规则表的具体符号: 通过 trait 包装,
+// 以后可替换为 OpenJTalk 兼容音素或 singing FA 自带 dictionary。
+
+/// 日语读音 → 音素序列的抽象。实现必须无锁可共享 (Send + Sync)。
+pub trait JapanesePhonemizer: Send + Sync {
+    fn name(&self) -> &'static str;
+
+    /// 把一个发音单位的读音 (假名) 展开为音素序列。
+    /// 未知假名返回空序列 (调用方据此保持 Unknown, 不伪造音素)。
+    fn phonemize(&self, pronunciation: &str) -> Result<Vec<PhonemeSpec>, String>;
+}
+
+/// 音素结果: 符号 + 分类 + 是否 pitch-bearing (由 pitch_policy 统一判定)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhonemeSpec {
+    pub symbol: String,
+    pub class: crate::models::PhonemeClass,
+    pub pitch_bearing: bool,
+}
+
+/// 当前规则表实现 (短期保留; §8.5: 不要继续无限手写扩展)
+pub struct RuleBasedPhonemizer;
+
+impl JapanesePhonemizer for RuleBasedPhonemizer {
+    fn name(&self) -> &'static str {
+        "rule-based-phonemizer"
+    }
+
+    fn phonemize(&self, pronunciation: &str) -> Result<Vec<PhonemeSpec>, String> {
+        Ok(mora::parse_kana_moras(pronunciation)
+            .iter()
+            .flat_map(|m| mora_to_phonemes(&m.kana))
+            .map(|symbol| {
+                let class = crate::japanese::pitch_policy::classify_phoneme_class(&symbol);
+                PhonemeSpec {
+                    symbol,
+                    class,
+                    pitch_bearing: crate::japanese::pitch_policy::phoneme_pitch_bearing(class),
+                }
+            })
+            .collect())
     }
 }
 

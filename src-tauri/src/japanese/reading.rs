@@ -207,7 +207,8 @@ impl JapaneseReadingProvider for KanaOnlyProvider {
         let mut mora_offset = 0usize;
         for frag in fragments {
             let (reading, confidence) = if frag.is_kana {
-                (frag.text.clone(), 1.0)
+                // 读取产生点统一 NFKC 规范化 (任务书 §8.4): 半角/组合浊音
+                (mora::normalize_kana(&frag.text), 1.0)
             } else {
                 (String::new(), 0.0)
             };
@@ -250,7 +251,9 @@ pub fn apply_reading_overrides(
             .chars()
             .all(|c| mora::is_kana_char(c) || c == '\u{30FC}');
         let (reading, pronunciation, confidence) = if is_kana {
-            (surface.clone(), surface.clone(), 1.0)
+            // 规范化域 (半角/组合浊音 → 全角), 与 provider 输出一致
+            let normalized = mora::normalize_kana(&surface);
+            (normalized.clone(), normalized, 1.0)
         } else {
             // A partial dictionary morpheme no longer has a trustworthy
             // reading. Keep its display text, but do not invent a mapping.
@@ -296,8 +299,9 @@ pub fn apply_reading_overrides(
         }
         replacements.push(ReadingSpan {
             surface,
-            pronunciation: ov.reading.clone(),
-            reading: ov.reading.clone(),
+            // Ruby 是最高优先级读音真值; 读取产生点统一规范化 (§8.4)
+            pronunciation: mora::normalize_kana(&ov.reading),
+            reading: mora::normalize_kana(&ov.reading),
             char_start,
             char_end,
             display_start: char_start,

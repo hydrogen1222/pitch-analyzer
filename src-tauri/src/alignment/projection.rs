@@ -11,11 +11,11 @@
 //
 // AcousticSpan / PitchAttachment 由对齐后端与 matcher 回填 (Commit 8/9)。
 
-use crate::japanese::unidic::katakana_to_hiragana;
-use crate::models::{
-    PhonemeClass, PhonemeUnit, PitchBearingPolicy, PronunciationUnit, PronunciationUnitKind,
-    SingingLanguage, SourceKind, SourceSpan,
+use crate::japanese::pitch_policy::{
+    classify_phoneme_class, classify_unit_kind, phoneme_pitch_bearing, pitch_bearing_policy,
 };
+use crate::japanese::unidic::katakana_to_hiragana;
+use crate::models::{PhonemeUnit, PronunciationUnit, SingingLanguage, SourceKind, SourceSpan};
 
 /// 一行歌词的 v4 文本/发音层投影结果。
 /// phonemes 与 pronunciation_units 通过 id 关联 (全行唯一)。
@@ -112,59 +112,6 @@ pub fn project_line_v4(line: &crate::models::LyricLine, language: SingingLanguag
     out
 }
 
-/// 促音/长音/拨音的显式语义 (任务书 P1-4)
-fn classify_unit_kind(kana: &str) -> PronunciationUnitKind {
-    match kana {
-        "っ" | "ッ" => PronunciationUnitKind::JapaneseSokuon,
-        "ー" => PronunciationUnitKind::JapaneseLongVowel,
-        "ん" | "ン" => PronunciationUnitKind::JapaneseMoraicNasal,
-        _ => PronunciationUnitKind::JapaneseMora,
-    }
-}
-
-fn pitch_bearing_policy(kind: PronunciationUnitKind) -> PitchBearingPolicy {
-    match kind {
-        PronunciationUnitKind::JapaneseSokuon => PitchBearingPolicy::None,
-        // 长音是前一母音核的延续: 可以共享前一 note, 也可能跨 note, 由声学决定
-        PronunciationUnitKind::JapaneseLongVowel => PitchBearingPolicy::Conditional,
-        // ん可 voiced: 取决于实际 voicing 证据, 不硬编码有无 pitch
-        PronunciationUnitKind::JapaneseMoraicNasal => PitchBearingPolicy::Conditional,
-        PronunciationUnitKind::JapaneseMora => PitchBearingPolicy::Nucleus,
-        PronunciationUnitKind::MandarinSyllable => PitchBearingPolicy::Nucleus,
-        PronunciationUnitKind::Silence | PronunciationUnitKind::Punctuation => {
-            PitchBearingPolicy::None
-        }
-        PronunciationUnitKind::Unknown => PitchBearingPolicy::Conditional,
-    }
-}
-
-fn classify_phoneme_class(symbol: &str) -> PhonemeClass {
-    match symbol {
-        "a" | "i" | "u" | "e" | "o" => PhonemeClass::Vowel,
-        // 长音符: 前一母音的延续 (§8/§11: 共享母音核)
-        ":" => PhonemeClass::Vowel,
-        "N" => PhonemeClass::Nasal,
-        "cl" => PhonemeClass::Closure,
-        "y" | "w" => PhonemeClass::Glide,
-        "sil" | "pau" => PhonemeClass::Silence,
-        "" => PhonemeClass::Unknown,
-        _ => {
-            if symbol.chars().all(|c| c.is_ascii_alphabetic()) {
-                PhonemeClass::Consonant
-            } else {
-                PhonemeClass::Unknown
-            }
-        }
-    }
-}
-
-fn phoneme_pitch_bearing(class: PhonemeClass) -> bool {
-    matches!(
-        class,
-        PhonemeClass::Vowel | PhonemeClass::Nasal | PhonemeClass::Glide
-    )
-}
-
 /// 原文片段书写类型: 全部同类 → 该类; 否则 Mixed
 pub fn classify_source_kind(surface: &str) -> SourceKind {
     let mut kinds: Vec<SourceKind> = Vec::new();
@@ -198,11 +145,23 @@ fn is_han_char(c: char) -> bool {
     ('\u{4E00}'..='\u{9FFF}').contains(&c) || ('\u{3400}'..='\u{4DBF}').contains(&c)
 }
 
+/// 单位内 pitch-bearing 音素范围 [start, end) 的投影层包装 (P1-3)。
+/// None = 物理无音高 (促音) 或无 voiced 音素。Commit 8/9 的 FA 与
+/// matcher 用它把 pitch 判定收窄到母音核。
+pub fn nucleus_hint_for(
+    unit: &PronunciationUnit,
+    phonemes: &[PhonemeUnit],
+) -> Option<(usize, usize)> {
+    crate::japanese::pitch_policy::nucleus_phoneme_range(unit, phonemes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lyrics::parse_lrc_with_language;
-    use crate::models::ProjectLanguage;
+    use crate::models::{
+        PhonemeClass, PitchBearingPolicy, ProjectLanguage, PronunciationUnitKind,
+    };
 
     fn project(text: &str) -> LineV4Layers {
         let lines = parse_lrc_with_language(
@@ -304,7 +263,7 @@ mod tests {
             ]
         );
         let bearing: Vec<bool> = layers.phonemes.iter().map(|p| p.pitch_bearing).collect();
-        assert_eq!(bearing, vec![false, true, true, false, false, true]);
+        assert_eq!(bearing, vec![false, false, true, false, false, true]);
         // 反向关联完整
         for unit in &layers.pronunciation_units {
             for pid in &unit.phoneme_ids {
