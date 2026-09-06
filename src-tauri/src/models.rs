@@ -643,3 +643,231 @@ pub fn midi_to_note_name(midi: f32) -> String {
         m.div_euclid(12) - 1
     )
 }
+
+// ── Round4 v4 canonical data model (任务书 §7) ─────────────────────
+//
+// 四层独立轨道: 文字层 ≠ 发音层 ≠ 声学对齐层 ≠ 音符层。
+// v4 类型与旧 ReadingSpan / MoraUnit 并存; 旧类型通过 alignment::projection
+// 投影为 v4, 一次性删除被明确禁止 (避免 massive breakage)。
+
+/// 原文层: 只回答"这是原文的哪一段", 不存任何 pitch / 时间。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SourceSpan {
+    pub id: usize,
+    pub surface: String,
+    /// 原文 char 区间 [start, end)
+    pub char_start: usize,
+    pub char_end: usize,
+    #[serde(default)]
+    pub language: SingingLanguage,
+    #[serde(default)]
+    pub pronunciation_ids: Vec<usize>,
+    #[serde(default)]
+    pub source_kind: SourceKind,
+}
+
+/// 原文片段的书写类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SourceKind {
+    #[default]
+    Unknown,
+    Han,
+    Kana,
+    Latin,
+    Number,
+    Punctuation,
+    Mixed,
+}
+
+/// 发音层: 统一日语 mora / 中文音节等"发音单位"。
+/// 时间与 pitch 不在这里 —— 它们属于声学层与 attachment。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PronunciationUnit {
+    pub id: usize,
+    #[serde(default)]
+    pub language: SingingLanguage,
+    /// 显示文本 (原假名/拼音等)
+    pub text: String,
+    /// 规范化文本 (片假名→平假名等)
+    #[serde(default)]
+    pub normalized: String,
+    #[serde(default)]
+    pub kind: PronunciationUnitKind,
+    #[serde(default)]
+    pub source_span_ids: Vec<usize>,
+    #[serde(default)]
+    pub phoneme_ids: Vec<usize>,
+    #[serde(default)]
+    pub pitch_bearing: PitchBearingPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PronunciationUnitKind {
+    JapaneseMora,
+    JapaneseSokuon,
+    JapaneseLongVowel,
+    JapaneseMoraicNasal,
+    MandarinSyllable,
+    Silence,
+    Punctuation,
+    #[default]
+    Unknown,
+}
+
+/// pitch-bearing 策略 (任务书 P1-4):
+/// Nucleus = 常规 pitch 载体; Conditional = 依赖声学证据 (ん/ー);
+/// None = 物理无音高 (っ/标点)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PitchBearingPolicy {
+    #[default]
+    Nucleus,
+    Conditional,
+    None,
+}
+
+/// 音素层: FA 的最小对齐单元。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PhonemeUnit {
+    pub id: usize,
+    pub symbol: String,
+    #[serde(default)]
+    pub class: PhonemeClass,
+    #[serde(default)]
+    pub pronunciation_unit_id: usize,
+    /// 母音/浊音成分才可能承载 pitch
+    #[serde(default)]
+    pub pitch_bearing: bool,
+    /// 声学对齐结果 (backend 完成对齐后回填)
+    #[serde(default)]
+    pub alignment: Option<AcousticSpan>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PhonemeClass {
+    Vowel,
+    Consonant,
+    Nasal,
+    Closure,
+    Glide,
+    Silence,
+    #[default]
+    Unknown,
+}
+
+/// 声学对齐层: 一个发音单位/音素在音频中的时间边界 + 证据语义。
+/// `raw_score` 可以是模型 logit/CTC score; 没做 calibration 时
+/// `calibrated_probability` 必须为 None (禁止 clamp 后冒充 confidence)。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AcousticSpan {
+    pub start: f32,
+    pub end: f32,
+    #[serde(default)]
+    pub backend: AlignmentBackendKind,
+    #[serde(default)]
+    pub quality: AlignmentQuality,
+    #[serde(default)]
+    pub raw_score: Option<f32>,
+    #[serde(default)]
+    pub calibrated_probability: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AlignmentBackendKind {
+    /// enhanced LRC 显示锚点 (§32: 不假定母音起点精确在字开始)
+    EnhancedLrc,
+    /// 生产 singing-domain FA (HubertFA 等, Commit 8+)
+    SingingFa,
+    /// legacy MMS-FA (Experimental)
+    LegacyMms,
+    /// 启发式 DP (MoraDP)
+    HeuristicDp,
+    #[default]
+    Unknown,
+}
+
+/// 对齐质量的诚实分级 (任务书 §15):
+/// Authoritative=增强LRC显示锚点; High/Medium=模型派生; Heuristic=启发式;
+/// Unknown=未知。没有 calibration 不得自称 High。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AlignmentQuality {
+    Authoritative,
+    High,
+    Medium,
+    Low,
+    Heuristic,
+    #[default]
+    Unknown,
+}
+
+/// 对齐证据 (P0-5): 取代"一个 f32 冒充 confidence"的旧语义。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AlignmentEvidence {
+    pub source: AlignmentSource,
+    #[serde(default)]
+    pub quality: AlignmentQuality,
+    #[serde(default)]
+    pub score: Option<f32>,
+    #[serde(default)]
+    pub calibrated_probability: Option<f32>,
+    #[serde(default)]
+    pub boundary_strength: Option<f32>,
+}
+
+/// 音高附着 (§7.5): matcher 的输出, 不把 note 直接塞进 token。
+/// many-to-many: 1 unit → 0/1/N notes, N units → 1 note 都合法。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PitchAttachment {
+    pub pronunciation_unit_id: usize,
+    /// pitch-bearing nucleus 的时间窗 (母音核), None = 无可靠声学核
+    #[serde(default)]
+    pub nucleus_span: Option<(f32, f32)>,
+    #[serde(default)]
+    pub note_ids: Vec<u32>,
+    #[serde(default)]
+    pub primary_note_id: Option<u32>,
+    #[serde(default)]
+    pub f0_summary: Option<F0Summary>,
+    #[serde(default)]
+    pub status: PitchAttachmentStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PitchAttachmentStatus {
+    Reliable,
+    Ambiguous,
+    NoVoicing,
+    NonPitchBearing,
+    #[default]
+    AlignmentMissing,
+    LowPitchConfidence,
+    LowCrossModelAgreement,
+}
+
+/// 核内 F0 稳健统计 (§13.2): 不使用"整个 mora span 简单平均"。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct F0Summary {
+    pub voiced_coverage: f32,
+    #[serde(default)]
+    pub median_midi: Option<f32>,
+    #[serde(default)]
+    pub mad_cents: Option<f32>,
+    #[serde(default)]
+    pub p10_midi: Option<f32>,
+    #[serde(default)]
+    pub p90_midi: Option<f32>,
+    #[serde(default)]
+    pub slope_cents_per_sec: Option<f32>,
+}
+
+/// 音符可靠性拆分 (P1-6): 取代含义不明的单一 "0.82"。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NoteReliability {
+    pub pitch_support: f32,
+    pub voiced_coverage: f32,
+    #[serde(default)]
+    pub pitch_agreement_cents: Option<f32>,
+    #[serde(default)]
+    pub boundary_quality: Option<f32>,
+    #[serde(default)]
+    pub model_presence: Option<f32>,
+}

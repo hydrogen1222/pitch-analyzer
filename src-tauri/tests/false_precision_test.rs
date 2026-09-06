@@ -94,18 +94,16 @@ fn weighted_fallback_timing_is_visual_only() {
         group.start_time = None;
         group.end_time = None;
     }
-    bind_pitch_to_tokens(
-        &mut lines,
-        &track,
-        0.3,
-        &NoteTrackingParams::default(),
-    );
+    bind_pitch_to_tokens(&mut lines, &track, 0.3, &NoteTrackingParams::default());
     for token in &lines[0].tokens {
         assert!(
             token.pitch_notes.is_empty() && token.primary_note.is_none(),
             "VisualOnly timing must not receive official pitch badges"
         );
-        assert_eq!(token.unpitched_reason, Some(UnpitchedReason::VisualTimingOnly));
+        assert_eq!(
+            token.unpitched_reason,
+            Some(UnpitchedReason::VisualTimingOnly)
+        );
     }
 }
 
@@ -128,7 +126,10 @@ fn mora_dp_timing_still_binds_pitch() {
         .iter()
         .filter(|t| !t.pitch_notes.is_empty())
         .count();
-    assert!(bound > 0, "MoraDP (heuristic but acoustic) must still bind pitch");
+    assert!(
+        bound > 0,
+        "MoraDP (heuristic but acoustic) must still bind pitch"
+    );
 }
 
 /// P0-6: FA 结果中缺失的 token 不再被赋整行时间 (用 mora 级 FA 单元测试:
@@ -142,16 +143,14 @@ fn untimed_tokens_report_alignment_missing_not_whole_line() {
         pitch_analyzer_tauri_lib::models::ProjectLanguage::Japanese,
     );
     let track = vo_track(1.0, 4.0);
-    bind_pitch_to_tokens(
-        &mut lines,
-        &track,
-        0.3,
-        &NoteTrackingParams::default(),
-    );
+    bind_pitch_to_tokens(&mut lines, &track, 0.3, &NoteTrackingParams::default());
     // 未对齐 (parse 后无时间) 的 token: 必须保持无时间且明确 AlignmentMissing
     for token in &lines[0].tokens {
         assert!(token.start_time.is_none() && token.end_time.is_none());
-        assert_eq!(token.unpitched_reason, Some(UnpitchedReason::AlignmentMissing));
+        assert_eq!(
+            token.unpitched_reason,
+            Some(UnpitchedReason::AlignmentMissing)
+        );
         assert!(token.pitch_notes.is_empty());
     }
 }
