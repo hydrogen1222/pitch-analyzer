@@ -258,7 +258,14 @@ pnpm tauri build
 
 #### 可选的真实声学强制对齐
 
-MMS-FA 是可选后端，需要安装含 `torch` 和 `torchaudio` 的 Python 环境，首次使用会下载声学模型。设置 `PITCH_ANALYZER_FA_ENABLE=1`，必要时再设置 `PITCH_ANALYZER_FA_PYTHON` / `PITCH_ANALYZER_FA_HELPER`。未配置时使用明确的 MoraDP 回退，对齐来源会保存在调试/导出数据中。
+MMS-FA 是可选后端（Legacy Experimental），需要安装含 `torch` 和 `torchaudio` 的 Python 环境，首次使用会下载声学模型。设置 `PITCH_ANALYZER_FA_ENABLE=1`，必要时再设置 `PITCH_ANALYZER_FA_PYTHON` / `PITCH_ANALYZER_FA_HELPER`。Round 4 起使用**持久 worker**（模型与音频整曲只加载一次，一次批处理多行）。未配置时使用明确的 MoraDP 回退（侧栏会显示"启发式回退"警告），对齐来源会保存在调试/导出数据中。
+
+#### Round 4 对齐架构（Alignment v4）
+
+- **歌词语言路由**：日语链路只对日语行启用；中文行按工程语言进入普通话拼音 G2P（保守词典实现：词组消歧 > 单字 fallback，未知字诚实标记 Unknown，不伪造读音）；纯汉字歧义行在 Auto 下保持 Unknown，需用户在侧栏"歌词语言"中显式指定。
+- **诚实的音高显示**：促音显示 `—`、缺失/低可信显示 `?`、仅视觉时间显示 `◦`（悬停有解释）； WeightedFallback 均匀分配只驱动卡拉OK高亮，不产生正式音高。
+- **GAME 语言感知与 overlap 切块**：语言 id 从模型 config 动态读取；长音频按 [context|core|context] 重叠切块并在切缝处合并持续音。
+- **Gold 基准**：`testdata/alignment_gold/` 含 schema 与回归门；详细对照见 [ALIGNMENT_V4_IMPLEMENTATION_REPORT.md](ALIGNMENT_V4_IMPLEMENTATION_REPORT.md) 与 [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md)。Production singing FA（HubertFA 体系）尚未接入——UI 中不会出现它的标记。
 
 <p align="right">(<a href="#top">Back to Top / 返回顶部</a>)</p>
 
