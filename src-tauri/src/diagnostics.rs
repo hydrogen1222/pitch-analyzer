@@ -59,37 +59,17 @@ pub struct LanguageObservation {
 
 impl LanguageObservation {
     fn record(&mut self, primary_text: &str) {
-        let mut has_kana = false;
-        let mut has_han = false;
-        let mut has_latin = false;
-        let mut has_visible = false;
-        for c in primary_text.chars() {
-            if c.is_whitespace() {
-                continue;
-            }
-            has_visible = true;
-            if crate::japanese::mora::is_kana_char(c) || c == '\u{30FC}' {
-                has_kana = true;
-            } else if is_han_char(c) {
-                has_han = true;
-            } else if c.is_ascii_alphanumeric() {
-                has_latin = true;
-            }
-        }
-        if !has_visible {
+        let f = crate::language::router::scan_script(primary_text);
+        if !f.has_visible {
             self.empty_lines += 1;
-        } else if has_kana {
+        } else if f.has_kana {
             self.lines_with_kana += 1;
-        } else if has_han {
+        } else if f.has_han {
             self.han_only_lines += 1;
-        } else if has_latin {
+        } else if f.has_ascii_alnum {
             self.latin_only_lines += 1;
         }
     }
-}
-
-fn is_han_char(c: char) -> bool {
-    ('\u{4E00}'..='\u{9FFF}').contains(&c) || ('\u{3400}'..='\u{4DBF}').contains(&c)
 }
 
 /// 当前 pipeline 的整体快照。字段全部为计数, 可直接做测试断言与 JSON 报告。

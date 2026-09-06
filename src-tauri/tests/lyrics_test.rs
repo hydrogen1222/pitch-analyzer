@@ -3,8 +3,10 @@ use pitch_analyzer_tauri_lib::forced_align::{
 };
 use pitch_analyzer_tauri_lib::lyrics::{
     align_token_times, align_token_times_with_backend, bind_pitch_to_tokens,
-    distribute_token_times, parse_lrc, parse_txt, select_primary_note, tokenize,
+    distribute_token_times, parse_lrc, parse_lrc_with_language, parse_txt,
+    select_primary_note, tokenize,
 };
+use pitch_analyzer_tauri_lib::models::ProjectLanguage;
 use pitch_analyzer_tauri_lib::models::AlignmentSource;
 use pitch_analyzer_tauri_lib::models::{NoteEvent, NoteTrackingParams, PitchNote, PitchTrack};
 use pitch_analyzer_tauri_lib::note_engine::{MusicalNoteEvent, MusicalNoteSource};
@@ -621,7 +623,12 @@ fn round3_align_units_no_duplicate_moras() {
         "心を引き裂く嵐の中",
         "流れる人の群れ",
     ] {
-        let lines = parse_lrc(&format!("[00:00.000]{}", text), Some(10.0));
+        // 日语 mora 语义测试: 显式 Japanese 工程, 绕过语言路由的纯汉字歧义判定
+        let lines = parse_lrc_with_language(
+            &format!("[00:00.000]{}", text),
+            Some(10.0),
+            ProjectLanguage::Japanese,
+        );
         assert_eq!(lines.len(), 1);
         let line = &lines[0];
         let mora_count = line.moras.len();

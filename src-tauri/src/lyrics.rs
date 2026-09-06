@@ -6,9 +6,10 @@ use crate::japanese::reading::{
     ReadingOverride,
 };
 use crate::japanese::{mora, phoneme, KanaOnlyProvider};
+use crate::language::{LanguageDecisionReason, LanguageRouter};
 use crate::models::{
     AlignmentSource, LyricLine, LyricToken, MoraUnit, NoteTrackingParams, PitchNote, PitchTrack,
-    ReadingDisplayGroup, UnpitchedReason,
+    ProjectLanguage, ReadingDisplayGroup, SingingLanguage, UnpitchedReason,
 };
 use crate::note_engine::NoteWindow;
 use regex::Regex;
@@ -287,6 +288,80 @@ fn build_japanese_layers(line: &mut LyricLine) {
     line.moras = moras;
 }
 
+// ── Language routing (Round4 Commit 2, P0-1) ───────────────
+
+/// 解析完成后按工程语言设置逐行路由 (任务书 §6):
+/// Japanese → 日语三层文本结构; Mandarin/Unknown → 不进入日语链路,
+/// 仅建立 1:1 显示组以保留 enhanced LRC 等显示时序语义。
+fn apply_language_layers(lines: &mut [LyricLine], project_language: ProjectLanguage) {
+    let router = LanguageRouter;
+    let dominant = match project_language {
+        ProjectLanguage::Auto => {
+            let texts: Vec<&str> = lines.iter().map(|l| l.primary_text.as_str()).collect();
+            router.detect_project_dominant(&texts)
+        }
+        _ => None,
+    };
+    for line in lines {
+        let decision = router.decide_line(&line.primary_text, project_language, dominant);
+        apply_language_layers_for_line(line, decision);
+    }
+}
+
+pub(crate) fn apply_language_layers_for_line(
+    line: &mut LyricLine,
+    decision: crate::language::LineLanguageDecision,
+) {
+    let _ = decision.reason;
+    match decision.language {
+        SingingLanguage::Japanese => build_japanese_layers(line),
+        // P0-1: Mandarin/Unknown 行绝不进入 UniDic 日语词典。
+        // Mandarin G2P 由 Round4 Commit 7 的 MandarinPipeline 接入。
+        SingingLanguage::Mandarin | SingingLanguage::Unknown => build_unknown_display_layers(line),
+        // 行级决策不输出 Auto; 旧序列化数据兜底按 Unknown 处理
+        SingingLanguage::Auto => build_unknown_display_layers(line),
+    }
+}
+
+/// 非日语行的显示层: 每个 token 一个 1:1 display group (读音为空)。
+/// 目的: enhanced LRC 逐字锚点等显示时序仍可投影到 token,
+/// 且绑定层能沿用 group 级路径; 不产生任何伪造读音/mora。
+fn build_unknown_display_layers(line: &mut LyricLine) {
+    let mut groups = Vec::with_capacity(line.tokens.len());
+    for token in line.tokens.iter_mut() {
+        let id = groups.len();
+        groups.push(ReadingDisplayGroup {
+            id,
+            char_start: token.char_start,
+            char_end: token.char_end,
+            // 无 reading span; 消费方仅通过 char 区间工作
+            reading_span_id: usize::MAX,
+            mora_start: 0,
+            mora_end: 0,
+            surface: token.text.clone(),
+            reading: String::new(),
+            phonetic: false,
+            start_time: None,
+            end_time: None,
+            pitch_notes: Vec::new(),
+            primary_note: None,
+            unpitched_reason: None,
+        });
+        token.reading_group_ids.push(id);
+    }
+    line.reading_display_groups = groups;
+}
+
+/// 行级决策的测试/诊断辅助 (任务书 §23)
+pub fn decide_line_language(
+    primary_text: &str,
+    project_language: ProjectLanguage,
+    project_dominant: Option<SingingLanguage>,
+) -> (SingingLanguage, LanguageDecisionReason) {
+    let decision = LanguageRouter.decide_line(primary_text, project_language, project_dominant);
+    (decision.language, decision.reason)
+}
+
 // ── 莫拉计数权重 (无词典 fallback; P1 UniDic 后仅保留兜底) ─────────
 
 /// 长音符 ー (U+30FC): UI 上并入前字显示, 但语义上是独立的一拍
@@ -370,13 +445,17 @@ pub fn token_weight(text: &str) -> f32 {
 // ── TXT Parser ─────────────────────────────────────────────
 
 pub fn parse_txt(text: &str) -> Vec<LyricLine> {
+    parse_txt_with_language(text, ProjectLanguage::Auto)
+}
+
+pub fn parse_txt_with_language(text: &str, project_language: ProjectLanguage) -> Vec<LyricLine> {
     // Common lyric sites distribute LRC syntax with a `.txt` extension. Treat
     // it as timed lyrics so metadata is ignored, same-timestamp translations
     // are merged, and 漢字(かな) remains authoritative ruby.
     let timed_line_re =
         Regex::new(r"(?m)^\s*\[\d{1,2}:\d{1,2}(?:\.\d{1,3})?\]").expect("valid timed TXT regex");
     if timed_line_re.is_match(text) {
-        return parse_lrc(text, None);
+        return parse_lrc_with_language(text, None, project_language);
     }
 
     let mut lines = Vec::new();
@@ -403,15 +482,23 @@ pub fn parse_txt(text: &str) -> Vec<LyricLine> {
             .into_iter()
             .map(|t| LyricToken::new(t.text, t.char_start, t.char_end))
             .collect();
-        build_japanese_layers(&mut line);
         lines.push(line);
     }
+    apply_language_layers(&mut lines, project_language);
     lines
 }
 
 // ── LRC Parser ─────────────────────────────────────────────
 
 pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
+    parse_lrc_with_language(text, audio_duration, ProjectLanguage::Auto)
+}
+
+pub fn parse_lrc_with_language(
+    text: &str,
+    audio_duration: Option<f32>,
+    project_language: ProjectLanguage,
+) -> Vec<LyricLine> {
     // 宽松时间戳: [mm:ss] / [mm:ss.f] / [mm:ss.ff] / [mm:ss.fff], 分和秒可 1-2 位
     let time_re = Regex::new(r"\[(\d{1,2}):(\d{1,2})(?:\.(\d{1,3}))?\]")
         .expect("Invalid LRC time regex pattern");
@@ -565,6 +652,15 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
         });
     }
 
+    let router = LanguageRouter;
+    let dominant = match project_language {
+        ProjectLanguage::Auto => {
+            let texts: Vec<&str> = merged.iter().map(|m| m.text.as_str()).collect();
+            router.detect_project_dominant(&texts)
+        }
+        _ => None,
+    };
+
     let mut lines = Vec::new();
     for (i, entry) in merged.iter().enumerate() {
         let start_time = entry.start_time;
@@ -600,7 +696,9 @@ pub fn parse_lrc(text: &str, audio_duration: Option<f32>) -> Vec<LyricLine> {
             .into_iter()
             .map(|t| LyricToken::new(t.text, t.char_start, t.char_end))
             .collect();
-        build_japanese_layers(&mut line);
+        // 语言路由: 只有日语行进入 UniDic/日语链路 (Round4 Commit 2, P0-1)
+        let decision = router.decide_line(&primary_text, project_language, dominant);
+        apply_language_layers_for_line(&mut line, decision);
 
         // enhanced LRC: 歌词自带逐字锚点 (绑定原文 span) → 直接使用, 不做自动估计
         if entry.anchors.len() >= 2 {

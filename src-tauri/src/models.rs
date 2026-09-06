@@ -1,5 +1,30 @@
 use serde::{Deserialize, Serialize};
 
+/// 行级已解析的演唱语言。`Auto` 只是用户请求值, 语言路由决策结果
+/// 永远是具体语言 (Japanese / Mandarin / Unknown), 不会残留 Auto。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SingingLanguage {
+    /// 无法可靠判定 (纯汉字歧义行 / 纯拉丁行 / 空行)
+    #[default]
+    Unknown,
+    Japanese,
+    Mandarin,
+    /// 仅作为用户请求/旧序列化占位; 路由决策从不输出 Auto
+    Auto,
+}
+
+/// 工程级语言设置 (用户 UI 可显式指定; 默认 Auto)。
+/// 优先级: 用户工程覆盖 > 脚本启发式 (Round4 任务书 §6.1)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ProjectLanguage {
+    #[default]
+    Auto,
+    Japanese,
+    Mandarin,
+    /// 工程内确有两种语言: 纯汉字行仍视为歧义, 不悄悄归入任一语言
+    Mixed,
+}
+
 /// 三级音高数据中的 "Clean Pitch Track"
 /// 保留真实连续 F0 曲线用于绘图，另存逐帧 RMS 与离散 NoteEvent 供字幕使用。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -539,6 +564,9 @@ pub struct ProjectData {
     pub lyrics: Vec<LyricLine>,
     #[serde(default)]
     pub analysis_params: Option<AnalysisParams>,
+    /// 工程语言设置 (Round4 Commit 2); 旧工程缺省为 Auto
+    #[serde(default)]
+    pub language: ProjectLanguage,
 }
 
 /// Independent FCPE evidence for one GAME region.

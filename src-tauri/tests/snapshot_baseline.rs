@@ -143,20 +143,20 @@ fn snapshot_parse_lrc_enhanced_anchors() {
     }
 }
 
-/// P0-1 baseline 证据: 纯中文行进入 UniDic, 被赋予日语读音。
-/// Commit 2 的语言路由落地后, 本快照更新为 mora_count=0 (中文暂无 pipeline)。
+/// P0-1 修复 (Round4 Commit 2): 纯中文行不再进入 UniDic 日语链路。
+/// Commit 1 基线中 `我爱你` 曾被读成 `わ が`。当前 Auto 路由下纯汉字歧义行
+/// 保持 Unknown (不悄悄选语言), Mandarin G2P 由 Commit 7 接入。
 #[test]
-fn snapshot_parse_txt_chinese_currently_routes_into_japanese() {
+fn snapshot_parse_txt_chinese_no_longer_reads_japanese() {
     let lines = parse_txt(ZH_PLAIN_TXT);
     let summary = summarize(&lines);
     let expected = PipelineSummary {
         line_count: 1,
         token_count: 3,
-        // BUG (P0-1): 我爱 → わ が (日语读音)
-        mora_count: 2,
-        display_group_count: 2,
+        mora_count: 0, // 修复: 不再产生日语 mora
+        display_group_count: 3, // 1:1 显示组 (读音为空, 仅承载显示时序)
         ruby_annotation_count: 0,
-        tokens_without_pronunciation: 2,
+        tokens_without_pronunciation: 3, // Mandarin pipeline 未接入, 诚实计数
         sources: pitch_analyzer_tauri_lib::diagnostics::AlignmentSourceCounts {
             unaligned: 3,
             ..Default::default()
@@ -166,14 +166,17 @@ fn snapshot_parse_txt_chinese_currently_routes_into_japanese() {
             ..Default::default()
         },
     };
-    assert_eq!(summary, expected, "ZH baseline drifted");
-    assert_eq!(
+    assert_eq!(summary, expected, "ZH routing changed unexpectedly");
+    assert!(
+        lines[0].moras.is_empty(),
+        "Chinese lines must not produce Japanese moras"
+    );
+    // 读音层全空: 无日语假名读音
+    assert!(
         lines[0]
-            .moras
+            .reading_display_groups
             .iter()
-            .map(|m| m.kana.as_str())
-            .collect::<Vec<_>>(),
-        vec!["わ", "が"]
+            .all(|g| g.reading.is_empty())
     );
 }
 
@@ -184,10 +187,10 @@ fn snapshot_parse_txt_timed_chinese_baseline() {
     let expected = PipelineSummary {
         line_count: 2,
         token_count: 5,
-        mora_count: 4, // BUG (P0-1): 我爱=わが, 再见=さい
-        display_group_count: 4,
+        mora_count: 0, // 修复 (Commit 2): 不再产生日语 mora
+        display_group_count: 5,
         ruby_annotation_count: 0,
-        tokens_without_pronunciation: 3,
+        tokens_without_pronunciation: 5,
         sources: pitch_analyzer_tauri_lib::diagnostics::AlignmentSourceCounts {
             unaligned: 5,
             ..Default::default()
@@ -218,6 +221,7 @@ fn snapshot_project_serde_round_trip() {
         pitch_track: None,
         lyrics: lines,
         analysis_params: None,
+        language: pitch_analyzer_tauri_lib::models::ProjectLanguage::Auto,
     };
     let json = serde_json::to_string(&project).expect("serialize project");
     let restored: ProjectData = serde_json::from_str(&json).expect("deserialize project");

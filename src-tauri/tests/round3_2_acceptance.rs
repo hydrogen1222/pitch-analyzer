@@ -1,6 +1,7 @@
 use pitch_analyzer_tauri_lib::japanese::mora::parse_kana_moras;
 use pitch_analyzer_tauri_lib::japanese::reading::parse_ruby_text;
-use pitch_analyzer_tauri_lib::lyrics::{bind_pitch_to_tokens, build_align_units_debug, parse_lrc};
+use pitch_analyzer_tauri_lib::lyrics::{bind_pitch_to_tokens, build_align_units_debug, parse_lrc, parse_lrc_with_language};
+use pitch_analyzer_tauri_lib::models::ProjectLanguage;
 use pitch_analyzer_tauri_lib::models::{NoteTrackingParams, PitchTrack, SungNoteClass};
 use pitch_analyzer_tauri_lib::note_engine::game::{
     assert_game_parity, compare_game_reference, GameReferenceNote,
@@ -159,7 +160,13 @@ fn kana_surface_uses_one_display_group_per_mora() {
 
 #[test]
 fn explicit_ruby_mora_can_claim_adjacent_real_vowel_onset() {
-    let mut lines = parse_lrc("[00:00.000]背伸(せの)[00:00.800]", Some(1.0));
+    // 纯汉字+显式 ruby: 显式 Japanese 工程 (语言路由后中文歧义行不再进入日语链路)
+    // 注意: 本测试保护的 200ms grace 行为将在 Round4 Commit 4 被删除/改写
+    let mut lines = parse_lrc_with_language(
+        "[00:00.000]背伸(せの)[00:00.800]",
+        Some(1.0),
+        ProjectLanguage::Japanese,
+    );
     assert_eq!(lines[0].reading_display_groups.len(), 2);
     lines[0].reading_display_groups[0].start_time = Some(0.0);
     lines[0].reading_display_groups[0].end_time = Some(0.30);

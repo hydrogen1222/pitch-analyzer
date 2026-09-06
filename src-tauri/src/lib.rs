@@ -1,6 +1,8 @@
 use crate::analyzer::PitchAnalyzer;
 use crate::forced_align::{ForcedAlignBackend, MmsForcedAlignBackend};
-use crate::models::{AnalysisParams, LyricLine, NoteTrackingParams, PitchTrack, ProjectData};
+use crate::models::{
+    AnalysisParams, LyricLine, NoteTrackingParams, PitchTrack, ProjectData, ProjectLanguage,
+};
 use crate::note_engine::game::{GameModelPaths, GameNoteEngine};
 use crate::note_engine::{CanonicalNotePostProcessor, MusicalNoteEngine, MusicalNoteSource};
 use crate::playback::AudioPlayer;
@@ -17,6 +19,7 @@ pub mod dsp;
 pub mod export;
 pub mod forced_align;
 pub mod japanese;
+pub mod language;
 pub mod lyrics;
 pub mod mel;
 pub mod models;
@@ -34,6 +37,8 @@ struct AppState {
     audio_path: Mutex<Option<String>>,
     /// 当前分析参数 (全局只使用同一套参数)
     analysis_params: Mutex<Option<AnalysisParams>>,
+    /// 工程语言设置 (Round4 Commit 2, P0-1): 默认 Auto, 用户可显式指定
+    project_language: Mutex<ProjectLanguage>,
 }
 
 fn find_game_model_dir(app_handle: &tauri::AppHandle, fcpe_model: &Path) -> Option<PathBuf> {
@@ -515,7 +520,8 @@ fn load_lyrics_lrc(
         .unwrap()
         .as_ref()
         .map(|t| t.times.last().copied().unwrap_or(0.0));
-    let mut lines = crate::lyrics::parse_lrc(&content, duration);
+    let project_language = *app_state.project_language.lock().unwrap();
+    let mut lines = crate::lyrics::parse_lrc_with_language(&content, duration, project_language);
     // 句级约束下根据音频特征做字级对齐 (无 track 时回退均匀分配)
     {
         let track_guard = app_state.track.lock().unwrap();
@@ -552,7 +558,8 @@ fn load_lyrics_txt(
     path: String,
 ) -> Result<Vec<LyricLine>, String> {
     let content = std::fs::read_to_string(&path).map_err(|e| format!("读取失败: {}", e))?;
-    let mut lines = crate::lyrics::parse_txt(&content);
+    let project_language = *app_state.project_language.lock().unwrap();
+    let mut lines = crate::lyrics::parse_txt_with_language(&content, project_language);
     // A `.txt` file may actually contain timed LRC + inline ruby. Give it the
     // exact same acoustic alignment path as the LRC import button.
     if lines
@@ -589,6 +596,23 @@ fn load_lyrics_txt(
 fn clear_lyrics(app_state: tauri::State<AppState>) -> Result<(), String> {
     app_state.lyrics.lock().unwrap().clear();
     Ok(())
+}
+
+/// 设置工程语言 (Round4 Commit 2, P0-1)。
+/// 生效时机: 下一次加载歌词时按此设置路由; UI 变更语言后需重新载入歌词。
+#[tauri::command]
+fn set_project_language(
+    app_state: tauri::State<AppState>,
+    language: ProjectLanguage,
+) -> Result<ProjectLanguage, String> {
+    *app_state.project_language.lock().unwrap() = language;
+    Ok(language)
+}
+
+/// 查询当前工程语言设置
+#[tauri::command]
+fn get_project_language(app_state: tauri::State<AppState>) -> Result<ProjectLanguage, String> {
+    Ok(*app_state.project_language.lock().unwrap())
 }
 
 /// 输出当前歌词状态的 pipeline 观测 (Round4 Commit 1: 只读诊断, 不改行为)
@@ -713,6 +737,7 @@ fn save_project(app_state: tauri::State<AppState>, path: String) -> Result<(), S
         pitch_track: app_state.track.lock().unwrap().clone(),
         lyrics: app_state.lyrics.lock().unwrap().clone(),
         analysis_params: app_state.analysis_params.lock().unwrap().clone(),
+        language: *app_state.project_language.lock().unwrap(),
     };
     let json = serde_json::to_string_pretty(&data).map_err(|e| format!("序列化失败: {}", e))?;
     std::fs::write(&path, json).map_err(|e| format!("写入失败: {}", e))?;
@@ -730,6 +755,7 @@ fn load_project(app_state: tauri::State<AppState>, path: String) -> Result<Proje
     *app_state.lyrics.lock().unwrap() = data.lyrics.clone();
     *app_state.audio_path.lock().unwrap() = data.audio_path.clone();
     *app_state.analysis_params.lock().unwrap() = data.analysis_params.clone();
+    *app_state.project_language.lock().unwrap() = data.language;
 
     // 恢复播放器 (音频文件存在时)
     if let Some(audio) = &data.audio_path {
@@ -904,6 +930,7 @@ pub fn run() {
             player: Mutex::new(None),
             audio_path: Mutex::new(None),
             analysis_params: Mutex::new(None),
+            project_language: Mutex::new(ProjectLanguage::Auto),
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -914,6 +941,8 @@ pub fn run() {
             load_lyrics_lrc,
             load_lyrics_txt,
             clear_lyrics,
+            set_project_language,
+            get_project_language,
             playback_play,
             playback_pause,
             playback_seek,
