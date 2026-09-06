@@ -1,6 +1,8 @@
 use pitch_analyzer_tauri_lib::japanese::mora::parse_kana_moras;
 use pitch_analyzer_tauri_lib::japanese::reading::parse_ruby_text;
-use pitch_analyzer_tauri_lib::lyrics::{bind_pitch_to_tokens, build_align_units_debug, parse_lrc, parse_lrc_with_language};
+use pitch_analyzer_tauri_lib::lyrics::{
+    bind_pitch_to_tokens, build_align_units_debug, parse_lrc, parse_lrc_with_language,
+};
 use pitch_analyzer_tauri_lib::models::ProjectLanguage;
 use pitch_analyzer_tauri_lib::models::{NoteTrackingParams, PitchTrack, SungNoteClass};
 use pitch_analyzer_tauri_lib::note_engine::game::{

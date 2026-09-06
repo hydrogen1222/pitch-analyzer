@@ -198,7 +198,11 @@ mod tests {
 
     #[test]
     fn han_only_inherits_japanese_dominant() {
-        let d = LanguageRouter.decide_line("未来", ProjectLanguage::Auto, Some(SingingLanguage::Japanese));
+        let d = LanguageRouter.decide_line(
+            "未来",
+            ProjectLanguage::Auto,
+            Some(SingingLanguage::Japanese),
+        );
         assert_eq!(d.language, SingingLanguage::Japanese);
         assert_eq!(d.reason, LanguageDecisionReason::InheritedProjectDominant);
     }
@@ -215,7 +219,11 @@ mod tests {
 
     #[test]
     fn mixed_project_keeps_han_ambiguous() {
-        let d = LanguageRouter.decide_line("未来", ProjectLanguage::Mixed, Some(SingingLanguage::Japanese));
+        let d = LanguageRouter.decide_line(
+            "未来",
+            ProjectLanguage::Mixed,
+            Some(SingingLanguage::Japanese),
+        );
         assert_eq!(d.language, SingingLanguage::Unknown);
         assert_eq!(d.reason, LanguageDecisionReason::HanOnlyAmbiguous);
         let d = LanguageRouter.decide_line("きみ", ProjectLanguage::Mixed, None);

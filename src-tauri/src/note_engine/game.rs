@@ -16,9 +16,13 @@
 // (禁止伪造 source=Game 的假输出 —— Round3 审计 P0)。
 
 use crate::models::midi_to_note_name;
-use crate::note_engine::{MusicalNoteEngine, MusicalNoteEvent, MusicalNoteSource};
+use crate::models::SingingLanguage;
+use crate::note_engine::{
+    MusicalNoteEngine, MusicalNoteEvent, MusicalNoteSource, NoteTranscriptionRequest,
+};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::{DynTensor, Tensor};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -199,7 +203,9 @@ impl GameModelPaths {
     }
 }
 
-/// config.json (缺省值与官方 game-infer 一致)
+/// config.json (缺省值与官方 game-infer 一致)。
+/// `languages` 是模型包自带的 id 映射 (官方 ONNX.md: en/ja/zh → 数字),
+/// 不同模型包映射可能不同, 必须动态读取, 禁止硬编码 ja=2 / zh=3。
 #[derive(Debug, Clone)]
 struct GameConfig {
     timestep: f32,
@@ -207,10 +213,20 @@ struct GameConfig {
     seg_threshold: f32,
     seg_radius_seconds: f32,
     est_threshold: f32,
+    languages: HashMap<String, i64>,
 }
 
 impl GameConfig {
     fn from_json(v: &serde_json::Value) -> Self {
+        let languages = v
+            .get("languages")
+            .and_then(|x| x.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(key, value)| value.as_i64().map(|id| (key.to_lowercase(), id)))
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             timestep: v.get("timestep").and_then(|x| x.as_f64()).unwrap_or(0.01) as f32,
             sample_rate: v
@@ -229,6 +245,40 @@ impl GameConfig {
                 .get("est_threshold")
                 .and_then(|x| x.as_f64())
                 .unwrap_or(0.2) as f32,
+            languages,
+        }
+    }
+
+    /// 解析 SingingLanguage → 模型 language id (Round4 Commit 3, P0-2)。
+    /// 规则 (任务书 §3 P0-2):
+    ///   Japanese -> lookup "ja"; Mandarin -> lookup "zh";
+    ///   Unknown/Auto unresolved -> 0;
+    ///   model config 无该语言 -> 0 + diagnostic warning。
+    fn language_id(&self, language: SingingLanguage) -> i64 {
+        let Some(key) = (match language {
+            SingingLanguage::Japanese => Some("ja"),
+            SingingLanguage::Mandarin => Some("zh"),
+            // universal / unset: 官方语义 0 = unset
+            SingingLanguage::Unknown | SingingLanguage::Auto => None,
+        }) else {
+            return 0;
+        };
+        match self.languages.get(key).copied() {
+            Some(id) => {
+                eprintln!(
+                    "[game] language {} -> model id {} (from model config)",
+                    key, id
+                );
+                id
+            }
+            None => {
+                eprintln!(
+                    "[game] model config has no id for language '{key}' (languages: {:?}); \
+                     falling back to universal id 0",
+                    self.languages
+                );
+                0
+            }
         }
     }
 }
@@ -633,10 +683,11 @@ impl MusicalNoteEngine for GameNoteEngine {
 
     fn transcribe(
         &self,
-        audio: &[f32],
-        sample_rate: u32,
-        optional_boundaries: Option<&[f32]>,
+        request: &NoteTranscriptionRequest,
     ) -> Result<Vec<MusicalNoteEvent>, Box<dyn std::error::Error>> {
+        let audio = request.audio;
+        let sample_rate = request.sample_rate;
+        let optional_boundaries = request.known_boundaries;
         if audio.is_empty() {
             return Ok(Vec::new());
         }
@@ -644,7 +695,8 @@ impl MusicalNoteEngine for GameNoteEngine {
         // 重采样到模型目标采样率 (官方 44100)
         let audio = crate::audio::resample_to(audio, sample_rate, self.config.sample_rate)?;
         let sr = self.config.sample_rate;
-        let language = 0i64; // universal (0 = unknown/universal, 官方默认)
+        // P0-2: 语言 id 来自模型 config, 不再硬编码 0
+        let language = self.config.language_id(request.language);
 
         let chunks = Self::slice(&audio, sr);
         if chunks.is_empty() {
@@ -753,5 +805,63 @@ impl MusicalNoteEngine for GameNoteEngine {
         }
 
         Ok(events)
+    }
+}
+
+#[cfg(test)]
+mod language_config_tests {
+    use super::*;
+
+    #[test]
+    fn parses_official_language_map() {
+        // 官方 GAME ONNX.md 示例映射; 本仓库捆绑模型包不得假设此映射
+        let config = GameConfig::from_json(&serde_json::json!({
+            "timestep": 0.01,
+            "languages": { "en": 1, "ja": 2, "zh": 3 }
+        }));
+        assert_eq!(config.language_id(SingingLanguage::Japanese), 2);
+        assert_eq!(config.language_id(SingingLanguage::Mandarin), 3);
+        // Unknown/Auto → universal id 0
+        assert_eq!(config.language_id(SingingLanguage::Unknown), 0);
+        assert_eq!(config.language_id(SingingLanguage::Auto), 0);
+    }
+
+    #[test]
+    fn different_model_mapping_is_respected_not_hardcoded() {
+        let config = GameConfig::from_json(&serde_json::json!({
+            "languages": { "ja": 7, "zh": 9 }
+        }));
+        assert_eq!(config.language_id(SingingLanguage::Japanese), 7);
+        assert_eq!(config.language_id(SingingLanguage::Mandarin), 9);
+    }
+
+    #[test]
+    fn missing_languages_block_falls_back_to_universal() {
+        let config = GameConfig::from_json(&serde_json::json!({ "timestep": 0.01 }));
+        assert!(config.languages.is_empty());
+        assert_eq!(config.language_id(SingingLanguage::Japanese), 0);
+        assert_eq!(config.language_id(SingingLanguage::Mandarin), 0);
+    }
+
+    #[test]
+    fn missing_language_key_warns_and_falls_back() {
+        let config = GameConfig::from_json(&serde_json::json!({
+            "languages": { "en": 1 }
+        }));
+        // ja/zh 不在映射中 → 0 (diagnostic warning 由 language_id 输出)
+        assert_eq!(config.language_id(SingingLanguage::Japanese), 0);
+        assert_eq!(config.language_id(SingingLanguage::Mandarin), 0);
+        assert_eq!(config.language_id(SingingLanguage::Unknown), 0);
+    }
+
+    #[test]
+    fn non_integer_language_values_are_ignored() {
+        let config = GameConfig::from_json(&serde_json::json!({
+            "languages": { "ja": "two", "zh": 3.5, "en": 1 }
+        }));
+        assert_eq!(config.languages.get("en"), Some(&1));
+        assert!(!config.languages.contains_key("ja"));
+        assert!(!config.languages.contains_key("zh"));
+        assert_eq!(config.language_id(SingingLanguage::Japanese), 0);
     }
 }

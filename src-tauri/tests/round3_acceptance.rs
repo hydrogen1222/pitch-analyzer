@@ -19,6 +19,18 @@ use pitch_analyzer_tauri_lib::note_engine::{
 };
 use std::path::{Path, PathBuf};
 
+fn game_request<'a>(
+    audio: &'a [f32],
+    boundaries: Option<&'a [f32]>,
+) -> pitch_analyzer_tauri_lib::note_engine::NoteTranscriptionRequest<'a> {
+    pitch_analyzer_tauri_lib::note_engine::NoteTranscriptionRequest {
+        audio,
+        sample_rate: 44_100,
+        language: pitch_analyzer_tauri_lib::models::SingingLanguage::Unknown,
+        known_boundaries: boundaries,
+    }
+}
+
 fn require_acceptance() {
     assert_eq!(
         std::env::var("ROUND3_ACCEPTANCE").as_deref(),
@@ -88,7 +100,7 @@ fn game_real_model_is_not_fixed_c4() {
     );
     let engine = GameNoteEngine::try_load(&dir).expect("real GAME model must load");
     let notes = engine
-        .transcribe(&synthetic_song(44_100), 44_100, None)
+        .transcribe(&game_request(&synthetic_song(44_100), None))
         .expect("real GAME inference must succeed");
     assert!(
         !notes.is_empty(),
@@ -111,11 +123,10 @@ fn game_mode_b_accepts_external_boundaries() {
     pitch_analyzer_tauri_lib::try_init_ort_dylib();
     let engine = GameNoteEngine::try_load(&game_dir()).expect("real GAME model must load");
     let notes = engine
-        .transcribe(
+        .transcribe(&game_request(
             &synthetic_song(44_100),
-            44_100,
             Some(&[0.0, 1.0, 2.0, 3.0, 4.0]),
-        )
+        ))
         .expect("GAME Mode B inference must succeed");
     assert!(notes.windows(2).all(|w| w[0].start <= w[1].start));
 }
@@ -153,7 +164,7 @@ fn game_official_reference_parity() {
         pitch_analyzer_tauri_lib::audio::load_audio_mono(&audio, engine.target_sample_rate())
             .expect("decode parity audio");
     let actual = engine
-        .transcribe(&decoded.samples, decoded.sample_rate, None)
+        .transcribe(&game_request(&decoded.samples, None))
         .expect("Rust GAME inference");
     let report = compare_game_reference(&actual, &reference);
     println!("GAME parity report: {report:?}");
@@ -220,7 +231,7 @@ fn round3_e2e_fixture_has_canonical_track_and_aligned_lyrics() {
     )
     .expect("decode E2E audio");
     let notes = engine
-        .transcribe(&decoded.samples, decoded.sample_rate, None)
+        .transcribe(&game_request(&decoded.samples, None))
         .expect("GAME E2E inference");
     assert!(!notes.is_empty(), "E2E GAME track is empty");
     let processor = CanonicalNotePostProcessor::new(0.3);

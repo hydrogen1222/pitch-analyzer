@@ -153,7 +153,7 @@ fn snapshot_parse_txt_chinese_no_longer_reads_japanese() {
     let expected = PipelineSummary {
         line_count: 1,
         token_count: 3,
-        mora_count: 0, // 修复: 不再产生日语 mora
+        mora_count: 0,          // 修复: 不再产生日语 mora
         display_group_count: 3, // 1:1 显示组 (读音为空, 仅承载显示时序)
         ruby_annotation_count: 0,
         tokens_without_pronunciation: 3, // Mandarin pipeline 未接入, 诚实计数
@@ -172,12 +172,10 @@ fn snapshot_parse_txt_chinese_no_longer_reads_japanese() {
         "Chinese lines must not produce Japanese moras"
     );
     // 读音层全空: 无日语假名读音
-    assert!(
-        lines[0]
-            .reading_display_groups
-            .iter()
-            .all(|g| g.reading.is_empty())
-    );
+    assert!(lines[0]
+        .reading_display_groups
+        .iter()
+        .all(|g| g.reading.is_empty()));
 }
 
 #[test]

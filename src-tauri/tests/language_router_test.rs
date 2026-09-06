@@ -24,9 +24,8 @@ const ZH_LRC: &str = "\
 ";
 
 fn is_kana(s: &str) -> bool {
-    s.chars().any(|c| {
-        ('\u{3041}'..='\u{309F}').contains(&c) || ('\u{30A0}'..='\u{30FF}').contains(&c)
-    })
+    s.chars()
+        .any(|c| ('\u{3041}'..='\u{309F}').contains(&c) || ('\u{30A0}'..='\u{30FF}').contains(&c))
 }
 
 #[test]
@@ -35,7 +34,10 @@ fn chinese_project_never_enters_japanese_pipeline() {
     let lines = parse_lrc_with_language(ZH_LRC, Some(6.0), ProjectLanguage::Mandarin);
     assert_eq!(lines.len(), 2);
     for line in &lines {
-        assert!(line.moras.is_empty(), "Mandarin lines must have no Japanese moras");
+        assert!(
+            line.moras.is_empty(),
+            "Mandarin lines must have no Japanese moras"
+        );
         assert!(
             line.reading_spans.iter().all(|s| !is_kana(&s.reading)),
             "Mandarin lines must not receive Japanese kana readings"
@@ -54,7 +56,11 @@ fn japanese_auto_project_unchanged_by_router() {
     assert_eq!(lines.len(), 2);
     // UniDic 词典读音仍然生效
     assert_eq!(
-        lines[0].moras.iter().map(|m| m.kana.as_str()).collect::<Vec<_>>(),
+        lines[0]
+            .moras
+            .iter()
+            .map(|m| m.kana.as_str())
+            .collect::<Vec<_>>(),
         vec!["きょ", "ー", "も", "き", "み", "を", "み", "て", "る"]
     );
 }
@@ -62,7 +68,11 @@ fn japanese_auto_project_unchanged_by_router() {
 #[test]
 fn japanese_kanji_only_line_inherits_dominant_japanese() {
     // 「夢」是纯汉字行; 工程含假名行 → 主导语言 Japanese → UniDic 读音
-    let lines = parse_lrc_with_language(JA_LRC_WITH_KANJI_ONLY_LINE, Some(6.0), ProjectLanguage::Auto);
+    let lines = parse_lrc_with_language(
+        JA_LRC_WITH_KANJI_ONLY_LINE,
+        Some(6.0),
+        ProjectLanguage::Auto,
+    );
     assert_eq!(lines.len(), 3);
     assert!(!is_kana(&lines[2].primary_text));
     assert!(
@@ -133,5 +143,8 @@ fn decide_line_language_debug_helper() {
     use pitch_analyzer_tauri_lib::lyrics::decide_line_language;
     let (lang, reason) = decide_line_language("きみ", ProjectLanguage::Auto, None);
     assert_eq!(lang, SingingLanguage::Japanese);
-    assert_eq!(reason, pitch_analyzer_tauri_lib::language::LanguageDecisionReason::ScriptKana);
+    assert_eq!(
+        reason,
+        pitch_analyzer_tauri_lib::language::LanguageDecisionReason::ScriptKana
+    );
 }

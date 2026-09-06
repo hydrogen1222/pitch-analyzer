@@ -451,15 +451,21 @@ async fn analyze_audio(
             let decoded =
                 crate::audio::load_audio_mono(Path::new(&audio_path), engine.target_sample_rate())
                     .map_err(|e| e.to_string())?;
-            let notes = engine
-                .transcribe(&decoded.samples, decoded.sample_rate, None)
-                .map_err(|e| e.to_string())?;
-            Ok::<_, String>((notes, engine.model_tag().to_string()))
+            // P0-2: 歌曲语言显式传入 GAME; id 由模型 config 决定
+            let language = resolve_song_language(&app_state);
+            let request = crate::note_engine::NoteTranscriptionRequest {
+                audio: &decoded.samples,
+                sample_rate: decoded.sample_rate,
+                language,
+                known_boundaries: None,
+            };
+            let notes = engine.transcribe(&request).map_err(|e| e.to_string())?;
+            Ok::<_, String>((notes, engine.model_tag().to_string(), language))
         })
     };
     if let Some(result) = game_attempt {
         match result {
-            Ok((notes, model)) => {
+            Ok((notes, model, language)) => {
                 let processor = CanonicalNotePostProcessor::new(config.confidence_threshold);
                 let canonical = processor.process(&notes, &track);
                 track.raw_game_notes = notes;
@@ -467,6 +473,7 @@ async fn analyze_audio(
                 track.musical_notes = processor.accepted_events(&canonical);
                 track.musical_note_source = MusicalNoteSource::Game;
                 track.musical_note_model = Some(model);
+                eprintln!("[game] transcription language resolved to {language:?} for this song");
             }
             Err(error) => {
                 eprintln!("GAME inference failed; keeping LegacyFcpeTracker notes: {error}");
@@ -613,6 +620,26 @@ fn set_project_language(
 #[tauri::command]
 fn get_project_language(app_state: tauri::State<AppState>) -> Result<ProjectLanguage, String> {
     Ok(*app_state.project_language.lock().unwrap())
+}
+
+/// 解析当前歌曲语言 (Round4 Commit 3): 工程设置优先;
+/// Auto 时从已加载歌词检测主导语言; Mixed/无法判定 → Unknown (universal id 0)。
+fn resolve_song_language(app_state: &tauri::State<AppState>) -> crate::models::SingingLanguage {
+    use crate::language::LanguageRouter;
+    use crate::models::SingingLanguage;
+    let project = *app_state.project_language.lock().unwrap();
+    match project {
+        ProjectLanguage::Japanese => SingingLanguage::Japanese,
+        ProjectLanguage::Mandarin => SingingLanguage::Mandarin,
+        ProjectLanguage::Mixed => SingingLanguage::Unknown,
+        ProjectLanguage::Auto => {
+            let lyrics = app_state.lyrics.lock().unwrap();
+            let texts: Vec<&str> = lyrics.iter().map(|l| l.primary_text.as_str()).collect();
+            LanguageRouter
+                .detect_project_dominant(&texts)
+                .unwrap_or(SingingLanguage::Unknown)
+        }
+    }
 }
 
 /// 输出当前歌词状态的 pipeline 观测 (Round4 Commit 1: 只读诊断, 不改行为)

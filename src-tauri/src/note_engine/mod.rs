@@ -5,6 +5,7 @@
 //   - Fallback engine: LegacyFcpeNoteTracker (基于 NoteTracker v2 stable-plateau)
 //   - Imported MIDI engine: 外部标准 MIDI
 
+use crate::models::SingingLanguage;
 use serde::{Deserialize, Serialize};
 
 pub mod game;
@@ -121,14 +122,23 @@ impl MusicalNoteEvent {
     }
 }
 
+/// 音乐音符转写请求 (Round4 Commit 3, P0-2)。
+/// 语言必须显式传递; 具体语言 id 由模型 config.json 动态读取,
+/// 禁止在调用侧硬编码 ja=2 / zh=3。
+pub struct NoteTranscriptionRequest<'a> {
+    pub audio: &'a [f32],
+    pub sample_rate: u32,
+    pub language: SingingLanguage,
+    /// Mode B: 外部已知 boundaries (绝对秒)
+    pub known_boundaries: Option<&'a [f32]>,
+}
+
 /// 音乐音符转写引擎统一 trait
 pub trait MusicalNoteEngine: Send + Sync {
     fn name(&self) -> &'static str;
 
     fn transcribe(
         &self,
-        audio: &[f32],
-        sample_rate: u32,
-        optional_boundaries: Option<&[f32]>,
+        request: &NoteTranscriptionRequest,
     ) -> Result<Vec<MusicalNoteEvent>, Box<dyn std::error::Error>>;
 }

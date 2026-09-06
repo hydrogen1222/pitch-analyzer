@@ -500,7 +500,14 @@ fn real_lrc_full_chain() {
             pitch_analyzer_tauri_lib::audio::load_audio_mono(song, engine.target_sample_rate())
                 .expect("decode GAME audio");
         let raw = engine
-            .transcribe(&decoded.samples, decoded.sample_rate, None)
+            .transcribe(
+                &pitch_analyzer_tauri_lib::note_engine::NoteTranscriptionRequest {
+                    audio: &decoded.samples,
+                    sample_rate: decoded.sample_rate,
+                    language: pitch_analyzer_tauri_lib::models::SingingLanguage::Japanese,
+                    known_boundaries: None,
+                },
+            )
             .expect("GAME inference");
         let processor = CanonicalNotePostProcessor::new(0.3);
         let canonical = processor.process(&raw, &track);

@@ -3,11 +3,11 @@ use pitch_analyzer_tauri_lib::forced_align::{
 };
 use pitch_analyzer_tauri_lib::lyrics::{
     align_token_times, align_token_times_with_backend, bind_pitch_to_tokens,
-    distribute_token_times, parse_lrc, parse_lrc_with_language, parse_txt,
-    select_primary_note, tokenize,
+    distribute_token_times, parse_lrc, parse_lrc_with_language, parse_txt, select_primary_note,
+    tokenize,
 };
-use pitch_analyzer_tauri_lib::models::ProjectLanguage;
 use pitch_analyzer_tauri_lib::models::AlignmentSource;
+use pitch_analyzer_tauri_lib::models::ProjectLanguage;
 use pitch_analyzer_tauri_lib::models::{NoteEvent, NoteTrackingParams, PitchNote, PitchTrack};
 use pitch_analyzer_tauri_lib::note_engine::{MusicalNoteEvent, MusicalNoteSource};
 use std::path::Path;

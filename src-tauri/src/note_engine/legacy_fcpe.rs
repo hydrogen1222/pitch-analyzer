@@ -2,7 +2,9 @@
 // 作为 GAME 模型缺失时的标准 fallback 引擎。
 
 use crate::models::NoteTrackingParams;
-use crate::note_engine::{MusicalNoteEngine, MusicalNoteEvent, MusicalNoteSource};
+use crate::note_engine::{
+    MusicalNoteEngine, MusicalNoteEvent, MusicalNoteSource, NoteTranscriptionRequest,
+};
 use crate::note_tracker;
 
 #[derive(Default)]
@@ -52,12 +54,12 @@ impl MusicalNoteEngine for LegacyFcpeNoteTracker {
 
     fn transcribe(
         &self,
-        _audio: &[f32],
-        _sample_rate: u32,
-        _optional_boundaries: Option<&[f32]>,
+        request: &NoteTranscriptionRequest,
     ) -> Result<Vec<MusicalNoteEvent>, Box<dyn std::error::Error>> {
         // 注意: 若直接从 raw audio 驱动, 需前置 FCPE 提取 F0;
-        // 推荐在 pipeline 中使用 transcribe_from_track 共享 F0 特征
+        // 推荐在 pipeline 中使用 transcribe_from_track 共享 F0 特征。
+        // language 字段对 legacy 引擎无意义 (F0 平台检测与语言无关), 忽略。
+        let _ = request.language;
         Err(
             "LegacyFcpeNoteTracker requires pre-extracted F0 track (use transcribe_from_track)"
                 .into(),
