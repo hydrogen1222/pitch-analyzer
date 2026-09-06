@@ -12,6 +12,7 @@ use tauri::Manager;
 pub mod analyzer;
 pub mod audio;
 pub mod decoder;
+pub mod diagnostics;
 pub mod dsp;
 pub mod export;
 pub mod forced_align;
@@ -498,6 +499,7 @@ async fn analyze_audio(
         }
     }
     rebind_lyrics(&app_state);
+    log_pipeline_summary(&app_state, "analyze_audio");
     Ok(t)
 }
 
@@ -540,6 +542,7 @@ fn load_lyrics_lrc(
     // 先写入 state → rebind → 从更新后的 state clone → 返回
     *app_state.lyrics.lock().unwrap() = lines;
     rebind_lyrics(&app_state);
+    log_pipeline_summary(&app_state, "load_lyrics_lrc");
     Ok(app_state.lyrics.lock().unwrap().clone())
 }
 
@@ -578,6 +581,7 @@ fn load_lyrics_txt(
     // 先写入 state → rebind → 从更新后的 state clone → 返回
     *app_state.lyrics.lock().unwrap() = lines;
     rebind_lyrics(&app_state);
+    log_pipeline_summary(&app_state, "load_lyrics_txt");
     Ok(app_state.lyrics.lock().unwrap().clone())
 }
 
@@ -585,6 +589,18 @@ fn load_lyrics_txt(
 fn clear_lyrics(app_state: tauri::State<AppState>) -> Result<(), String> {
     app_state.lyrics.lock().unwrap().clear();
     Ok(())
+}
+
+/// 输出当前歌词状态的 pipeline 观测 (Round4 Commit 1: 只读诊断, 不改行为)
+fn log_pipeline_summary(app_state: &tauri::State<AppState>, stage: &str) {
+    let lines = app_state.lyrics.lock().unwrap().clone();
+    let backend = app_state
+        .forced_align
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|fa| fa.name().to_string());
+    crate::diagnostics::log_summary(stage, backend.as_deref(), &lines);
 }
 
 /// 使用当前共享参数 rebind 歌词 (不再硬编码 0.3)
