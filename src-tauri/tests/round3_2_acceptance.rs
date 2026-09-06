@@ -161,9 +161,10 @@ fn kana_surface_uses_one_display_group_per_mora() {
 }
 
 #[test]
-fn explicit_ruby_mora_can_claim_adjacent_real_vowel_onset() {
-    // 纯汉字+显式 ruby: 显式 Japanese 工程 (语言路由后中文歧义行不再进入日语链路)
-    // 注意: 本测试保护的 200ms grace 行为将在 Round4 Commit 4 被删除/改写
+fn explicit_ruby_mora_without_real_overlap_gets_no_pitch() {
+    // Round4 Commit 4 (P0-7): 200ms phonetic grace 已删除。
+    // 「せ」(0.00-0.30) 与唯一音符 (0.30-0.80) 零真实重叠 →
+    // 不得借相邻 group 的音符, 必须明确显示 unpitched (NoOverlappingNote)。
     let mut lines = parse_lrc_with_language(
         "[00:00.000]背伸(せの)[00:00.800]",
         Some(1.0),
@@ -183,8 +184,13 @@ fn explicit_ruby_mora_can_claim_adjacent_real_vowel_onset() {
     let groups = &lines[0].reading_display_groups;
     assert_eq!(groups[0].reading, "せ");
     assert!(
-        groups[0].primary_note.is_some(),
-        "the consonant-leading mora must use the adjacent real vowel onset"
+        groups[0].primary_note.is_none(),
+        "a mora with zero real overlap must not borrow the next group's note"
+    );
+    assert_eq!(groups[0].pitch_notes.len(), 0);
+    assert_eq!(
+        groups[0].unpitched_reason,
+        Some(pitch_analyzer_tauri_lib::models::UnpitchedReason::NoOverlappingNote)
     );
     assert!(groups[1].primary_note.is_some());
 }

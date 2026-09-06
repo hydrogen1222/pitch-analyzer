@@ -9,7 +9,7 @@ use crate::japanese::{mora, phoneme, KanaOnlyProvider};
 use crate::language::{LanguageDecisionReason, LanguageRouter};
 use crate::models::{
     AlignmentSource, LyricLine, LyricToken, MoraUnit, NoteTrackingParams, PitchNote, PitchTrack,
-    ProjectLanguage, ReadingDisplayGroup, SingingLanguage, UnpitchedReason,
+    ProjectLanguage, ReadingDisplayGroup, SingingLanguage, TimingPurpose, UnpitchedReason,
 };
 use crate::note_engine::NoteWindow;
 use regex::Regex;
@@ -995,14 +995,13 @@ fn apply_forced_alignment(
         AlignmentSource::ForcedAlign,
         result.confidence.clamp(0.0, 1.0),
     );
+    // Round4 Commit 4 (P0-6): FA 未覆盖的 token 不再被赋整行时间并标记
+    // ForcedAlign —— 那会让 binder 在整行范围内"成功"绑到完全无关的音符。
+    // 未对齐 token 保持无时间、无来源; 绑定层会给出 AlignmentMissing。
     for token in &mut line.tokens {
         if token.start_time.is_none() || token.end_time.is_none() {
-            // 非日语/无读音 token 不应被误报成 FA 成功；给它一个窗口时间，
-            // 音高绑定仍会根据真实重叠给出明确的 unpitched reason。
-            token.start_time = Some(line_start);
-            token.end_time = Some(line_end);
-            token.alignment_source = Some(AlignmentSource::ForcedAlign);
-            token.alignment_confidence = result.confidence.clamp(0.0, 1.0);
+            token.alignment_source = None;
+            token.alignment_confidence = 0.0;
         }
     }
     true
@@ -1301,7 +1300,10 @@ fn dp_align_line(
             if let Some(m) = line.moras.get_mut(mi) {
                 m.start_time = Some(us);
                 m.end_time = Some(ue);
-                m.confidence = if u.known { 0.7 } else { 0.3 };
+                // Round4 Commit 4 (P0-5): 删除伪置信度 0.7/0.3。
+                // MoraDP 是启发式边界猜测, 不是模型概率, 没有 calibration;
+                // 0.0 = "无校准概率", 语义化的 AlignmentEvidence 在 Commit 5 落地。
+                m.confidence = 0.0;
             }
         }
     }
@@ -1313,7 +1315,7 @@ fn dp_align_line(
         token.start_time = None;
         token.end_time = None;
     }
-    project_mora_times_to_groups_and_tokens(line, AlignmentSource::MoraDp, 0.7);
+    project_mora_times_to_groups_and_tokens(line, AlignmentSource::MoraDp, 0.0);
     for (ti, token) in line.tokens.iter().enumerate() {
         token_has_mora[ti] = token.start_time.is_some() && token.end_time.is_some();
     }
@@ -1355,10 +1357,9 @@ fn dp_align_line(
 
 const MIN_NOTE_FRAMES: usize = 5;
 const DOMINANT_NOTE_RATIO: f32 = 0.65;
-/// MoraDP may place a consonant→vowel FCPE onset exactly on the boundary to
-/// the next mora. Within the same explicit ruby word, permit a small evidence
-/// look-ahead so the consonant-leading mora can claim its real vowel pitch.
-const PHONETIC_ONSET_GRACE_SECS: f32 = 0.20;
+// Round4 Commit 4 (P0-7): PHONETIC_ONSET_GRACE_SECS (200ms 跨 group 借音) 已删除。
+// 200ms 在音乐时间尺度足以跨越一个 16 分音符 (120BPM = 125ms),
+// 该机制会造成前一假名"抢"后一假名的音符。
 
 /// 绑定 pitch 到每个 token (软评分, many-to-many) 并选 primary_note。
 ///
@@ -1407,6 +1408,32 @@ pub fn bind_pitch_to_tokens(
                         end,
                         confidence_threshold,
                     )),
+                    _ => Some(UnpitchedReason::AlignmentMissing),
+                };
+            }
+            continue;
+        }
+        // Round4 Commit 4 (§15.1): WeightedFallback 时间是 VisualOnly ——
+        // 只用于卡拉OK视觉推进, 不参与正式 pitch attribution。
+        // 覆盖率下降是预期结果: 宁可少显示, 也不要错显示。
+        // 注: display group 的时间只由 EnhancedLrc/ForcedAlign/MoraDp 投影产生,
+        // WeightedFallback 从不设置 group 时间, 因此 timed group 即声学时间。
+        let has_acoustic_timing = line.tokens.iter().any(|token| {
+            token.start_time.is_some()
+                && token
+                    .alignment_source
+                    .map(|source| source.timing_purpose() == TimingPurpose::Acoustic)
+                    .unwrap_or(true) // 旧数据无来源标签: 保持既有绑定行为
+        }) || line
+            .reading_display_groups
+            .iter()
+            .any(|group| group.start_time.is_some());
+        if !has_acoustic_timing {
+            for token in &mut line.tokens {
+                token.pitch_notes.clear();
+                token.primary_note = None;
+                token.unpitched_reason = match (token.start_time, token.end_time) {
+                    (Some(_), Some(_)) => Some(UnpitchedReason::VisualTimingOnly),
                     _ => Some(UnpitchedReason::AlignmentMissing),
                 };
             }
@@ -1670,28 +1697,10 @@ fn bind_line_at_display_group_level<T: NoteWindow>(
             group_results.push((Vec::new(), None, Some(UnpitchedReason::AlignmentMissing)));
             continue;
         };
-        let mut evidence_end = end;
-        let mut cands = admit_events_for_window(events, start, evidence_end);
-        if cands.is_empty() && group.phonetic {
-            if let Some(next) = line
-                .reading_display_groups
-                .get(group_index + 1)
-                .filter(|next| {
-                    next.phonetic
-                        && next.char_start == group.char_start
-                        && next.char_end == group.char_end
-                        && next
-                            .start_time
-                            .is_some_and(|next_start| (next_start - end).abs() <= 0.03)
-                })
-            {
-                evidence_end = next
-                    .end_time
-                    .unwrap_or(end + PHONETIC_ONSET_GRACE_SECS)
-                    .min(end + PHONETIC_ONSET_GRACE_SECS);
-                cands = admit_events_for_window(events, start, evidence_end);
-            }
-        }
+        let mut cands = admit_events_for_window(events, start, end);
+        // Round4 Commit 4 (P0-7): 跨 group 借音 (200ms phonetic grace) 已删除。
+        // 候选只允许来自本 group 时间窗内的真实重叠; 辅音起音与母音分离应由
+        // phoneme 级对齐解决 (Round4 Commit 6/8), 不允许扩大 group 时间窗。
         if cands.is_empty() {
             group_results.push((
                 Vec::new(),
@@ -1711,7 +1720,7 @@ fn bind_line_at_display_group_level<T: NoteWindow>(
             let event = &events[idx];
             let (event_start, event_end) = event.window();
             let rs = event_start.max(start);
-            let re = event_end.min(evidence_end);
+            let re = event_end.min(end);
             notes.push(note_window_to_pitch_note(event, rs, re));
             scores.push(primary_score(event, overlap));
         }

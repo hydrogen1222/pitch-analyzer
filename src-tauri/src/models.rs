@@ -324,6 +324,25 @@ pub enum AlignmentSource {
     WeightedFallback,
 }
 
+/// 时间戳的用途语义 (Round4 任务书 §15.1)。
+/// VisualOnly 的时间只允许驱动卡拉OK视觉推进, 不允许参与正式 pitch attribution。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimingPurpose {
+    Acoustic,
+    VisualOnly,
+}
+
+impl AlignmentSource {
+    /// 来源 → 时间用途。WeightedFallback 是纯视觉兜底 (均匀分配),
+    /// 其余来源具有声学含义 (MoraDp 虽是启发式, 但基于真实音频证据)。
+    pub fn timing_purpose(self) -> TimingPurpose {
+        match self {
+            AlignmentSource::WeightedFallback => TimingPurpose::VisualOnly,
+            _ => TimingPurpose::Acoustic,
+        }
+    }
+}
+
 /// 一个 token 没有音高 badge 的原因 (区分"物理无音高"与"算法丢失")
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnpitchedReason {
@@ -345,6 +364,9 @@ pub enum UnpitchedReason {
     AmbiguousMusicalNote,
     /// The lyric unit has no sufficiently reliable acoustic alignment.
     AlignmentLowConfidence,
+    /// Timing is a visual-only fallback (WeightedFallback): karaoke highlight
+    /// is allowed, official pitch attribution is not (Round4 任务书 §15.1).
+    VisualTimingOnly,
 }
 
 /// token 与 NoteEvent 的一次软绑定 (many-to-many: 一个 token 可绑多个音, 多个 token 可共享一个音)
