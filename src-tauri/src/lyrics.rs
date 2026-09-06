@@ -141,6 +141,7 @@ pub(crate) fn apply_language_layers_for_line(
     decision: crate::language::LineLanguageDecision,
 ) {
     let _ = decision.reason;
+    line.language = Some(decision.language);
     match decision.language {
         SingingLanguage::Japanese => build_japanese_layers(line),
         // P0-1: Mandarin/Unknown 行绝不进入 UniDic 日语词典。

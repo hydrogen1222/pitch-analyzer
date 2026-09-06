@@ -699,6 +699,12 @@ fn rebind_lyrics(app_state: &tauri::State<AppState>) {
         params.confidence_threshold,
         &note_tracking,
     );
+    // Round4 Commit 9: LyricNoteMatcher v2 的 v4 attachments 与旧 binder 并行落盘
+    crate::alignment::note_matcher::attach_lines(
+        &mut lyrics_guard,
+        track,
+        params.confidence_threshold,
+    );
 }
 
 #[tauri::command]
@@ -924,6 +930,8 @@ fn export_debug_segment(
                 "moras": l.moras,
                 "tokens": l.tokens,
                 "alignment_sources": l.tokens.iter().map(|t| t.alignment_source).collect::<Vec<_>>(),
+                "language": l.language,
+                "pitch_attachments": l.pitch_attachments,
             })
         })
         .collect();

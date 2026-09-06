@@ -5,4 +5,5 @@
 //   - note_matcher: pronunciation/acoustic unit ↔ GAME note 匹配 (Commit 9)
 //   - pipeline / diagnostics: 后续 commit 接入
 
+pub mod note_matcher;
 pub mod projection;

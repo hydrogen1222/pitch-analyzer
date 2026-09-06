@@ -555,6 +555,12 @@ pub struct LyricLine {
     /// Mandarin 读音用户覆盖 (Round4 Commit 7; 最高优先级读音真值)
     #[serde(default)]
     pub mandarin_overrides: Vec<crate::mandarin::overrides::MandarinOverride>,
+    /// 行级已解析语言 (Commit 9 起落盘; 旧工程 None = 由路由重新判定)
+    #[serde(default)]
+    pub language: Option<SingingLanguage>,
+    /// LyricNoteMatcher v2 输出 (Commit 9): 按 pronunciation unit (mora 序) 对齐
+    #[serde(default)]
+    pub pitch_attachments: Vec<PitchAttachment>,
 }
 
 impl LyricLine {
@@ -579,6 +585,8 @@ impl LyricLine {
             reading_display_groups: Vec::new(),
             moras: Vec::new(),
             mandarin_overrides: Vec::new(),
+            language: None,
+            pitch_attachments: Vec::new(),
         }
     }
 }
@@ -845,6 +853,8 @@ pub enum PitchAttachmentStatus {
     AlignmentMissing,
     LowPitchConfidence,
     LowCrossModelAgreement,
+    /// 有 voicing 但核内没有任何音符真实重叠 (宁可 Unknown 也不借音)
+    NoOverlappingNote,
 }
 
 /// 核内 F0 稳健统计 (§13.2): 不使用"整个 mora span 简单平均"。
