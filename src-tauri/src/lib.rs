@@ -645,9 +645,7 @@ fn get_project_language(app_state: tauri::State<AppState>) -> Result<ProjectLang
 
 /// 查询对齐后端与语言状态 (Round4 Commit 11: UI 必须显示实际 backend/fallback)
 #[tauri::command]
-fn get_alignment_status(
-    app_state: tauri::State<AppState>,
-) -> Result<serde_json::Value, String> {
+fn get_alignment_status(app_state: tauri::State<AppState>) -> Result<serde_json::Value, String> {
     let backend = app_state
         .forced_align
         .lock()

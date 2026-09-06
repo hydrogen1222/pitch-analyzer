@@ -1,0 +1,11 @@
+{
+  "language": "ja",
+  "text": "今日も",
+  "line_start": 1.0,
+  "line_end": 3.0,
+  "units": [
+    { "text": "きょ", "start": 1.0, "end": 1.4, "nucleus_start": 1.1, "nucleus_end": 1.4, "notes": [64.0] },
+    { "text": "ー", "start": 1.4, "end": 1.8, "nucleus_start": 1.4, "nucleus_end": 1.8, "notes": [66.0] },
+    { "text": "も", "start": 1.8, "end": 2.2, "nucleus_start": 1.8, "nucleus_end": 2.2, "notes": [62.0] }
+  ]
+}
