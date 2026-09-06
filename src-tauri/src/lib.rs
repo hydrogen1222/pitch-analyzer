@@ -22,6 +22,7 @@ pub mod forced_align;
 pub mod japanese;
 pub mod language;
 pub mod lyrics;
+pub mod mandarin;
 pub mod mel;
 pub mod models;
 pub mod note_engine;

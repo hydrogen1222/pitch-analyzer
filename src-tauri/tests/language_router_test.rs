@@ -35,8 +35,12 @@ fn chinese_project_never_enters_japanese_pipeline() {
     assert_eq!(lines.len(), 2);
     for line in &lines {
         assert!(
-            line.moras.is_empty(),
-            "Mandarin lines must have no Japanese moras"
+            !line.moras.is_empty(),
+            "Mandarin lines must have syllable units (Commit 7)"
+        );
+        assert!(
+            line.moras.iter().all(|m| !is_kana(&m.kana)),
+            "Mandarin syllables must be pinyin, never Japanese kana"
         );
         assert!(
             line.reading_spans.iter().all(|s| !is_kana(&s.reading)),
@@ -87,7 +91,10 @@ fn chinese_project_does_not_run_unidic_on_kana_lines_either() {
     // 工程覆盖 Mandarin 优先于脚本证据 (任务书 §6.1)
     let lines = parse_lrc_with_language(JA_LRC, Some(6.0), ProjectLanguage::Mandarin);
     for line in &lines {
-        assert!(line.moras.is_empty());
+        assert!(
+            line.moras.iter().all(|m| !is_kana(&m.kana)),
+            "Mandarin project must never produce Japanese kana moras"
+        );
     }
 }
 
@@ -121,9 +128,13 @@ fn enhanced_lrc_timing_survives_for_unknown_language_lines() {
 fn parse_txt_with_language_routes_same_as_lrc() {
     let txt = "我爱你\n";
     let lines = parse_txt_with_language(txt, ProjectLanguage::Mandarin);
-    assert!(lines[0].moras.is_empty());
+    assert_eq!(lines[0].moras.len(), 3, "Commit 7: pinyin syllable units");
+    assert!(lines[0].moras.iter().all(|m| !is_kana(&m.kana)));
     let lines = parse_txt_with_language(txt, ProjectLanguage::Auto);
-    assert!(lines[0].moras.is_empty());
+    assert!(
+        lines[0].moras.is_empty(),
+        "Auto + ambiguous han stays Unknown"
+    );
 }
 
 #[test]
@@ -131,9 +142,10 @@ fn mandarin_project_diagnostic_summary_is_honest() {
     // 中文行在 Mandarin pipeline 接入前: 无 mora、无读音 —— 诊断必须如实反映
     let lines = parse_lrc_with_language(ZH_LRC, Some(6.0), ProjectLanguage::Mandarin);
     let summary = summarize(&lines);
-    assert_eq!(summary.mora_count, 0);
+    // Commit 7: 拼音音节单元已存在 (每字一个), 不再是空读音层
+    assert_eq!(summary.mora_count, 7);
     assert_eq!(summary.token_count, 7); // 我爱你(3) + 重新开始(4)
-    assert_eq!(summary.tokens_without_pronunciation, 7);
+    assert_eq!(summary.tokens_without_pronunciation, 0);
     assert_eq!(summary.language_observation.han_only_lines, 2);
     assert_eq!(summary.language_observation.lines_with_kana, 0);
 }

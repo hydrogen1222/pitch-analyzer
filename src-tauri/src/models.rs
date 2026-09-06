@@ -552,6 +552,9 @@ pub struct LyricLine {
     /// 行内莫拉序列 (对齐的最小文本单位)
     #[serde(default)]
     pub moras: Vec<MoraUnit>,
+    /// Mandarin 读音用户覆盖 (Round4 Commit 7; 最高优先级读音真值)
+    #[serde(default)]
+    pub mandarin_overrides: Vec<crate::mandarin::overrides::MandarinOverride>,
 }
 
 impl LyricLine {
@@ -575,6 +578,7 @@ impl LyricLine {
             reading_spans: Vec::new(),
             reading_display_groups: Vec::new(),
             moras: Vec::new(),
+            mandarin_overrides: Vec::new(),
         }
     }
 }

@@ -144,11 +144,24 @@ pub(crate) fn apply_language_layers_for_line(
     match decision.language {
         SingingLanguage::Japanese => build_japanese_layers(line),
         // P0-1: Mandarin/Unknown 行绝不进入 UniDic 日语词典。
-        // Mandarin G2P 由 Round4 Commit 7 的 MandarinPipeline 接入。
-        SingingLanguage::Mandarin | SingingLanguage::Unknown => build_unknown_display_layers(line),
+        // Mandarin 走自己的 G2P pipeline (Round4 Commit 7), 读音不确定时诚实标 Unknown。
+        SingingLanguage::Mandarin => {
+            let overrides = line.mandarin_overrides.clone();
+            crate::mandarin::pipeline::build_mandarin_layers(
+                line,
+                &crate::mandarin::DictMandarinReadingProvider,
+                &overrides,
+            );
+        }
+        SingingLanguage::Unknown => build_unknown_display_layers(line),
         // 行级决策不输出 Auto; 旧序列化数据兜底按 Unknown 处理
         SingingLanguage::Auto => build_unknown_display_layers(line),
     }
+}
+
+/// 供 mandarin::pipeline 在 provider 失败时退回纯显示层
+pub fn build_unknown_display_layers_pub(line: &mut LyricLine) {
+    build_unknown_display_layers(line);
 }
 
 /// 非日语行的显示层: 每个 token 一个 1:1 display group (读音为空)。

@@ -15,7 +15,9 @@ use crate::japanese::pitch_policy::{
     classify_phoneme_class, classify_unit_kind, phoneme_pitch_bearing, pitch_bearing_policy,
 };
 use crate::japanese::unidic::katakana_to_hiragana;
-use crate::models::{PhonemeUnit, PronunciationUnit, SingingLanguage, SourceKind, SourceSpan};
+use crate::models::{
+    PhonemeUnit, PronunciationUnit, PronunciationUnitKind, SingingLanguage, SourceKind, SourceSpan,
+};
 
 /// 一行歌词的 v4 文本/发音层投影结果。
 /// phonemes 与 pronunciation_units 通过 id 关联 (全行唯一)。
@@ -65,7 +67,12 @@ pub fn project_line_v4(line: &crate::models::LyricLine, language: SingingLanguag
     //    mora 是读音展开的真实结果 (ruby > UniDic > kana), 不按汉字拆分。
     for mora in &line.moras {
         let unit_id = out.pronunciation_units.len();
-        let kind = classify_unit_kind(&mora.kana);
+        let kind = if language == SingingLanguage::Mandarin {
+            // 中文: 1 汉字 = 1 音节 (任务书 §9.1)
+            PronunciationUnitKind::MandarinSyllable
+        } else {
+            classify_unit_kind(&mora.kana)
+        };
         let normalized = katakana_to_hiragana(&mora.kana);
         let pitch_bearing = pitch_bearing_policy(kind);
 
@@ -159,9 +166,7 @@ pub fn nucleus_hint_for(
 mod tests {
     use super::*;
     use crate::lyrics::parse_lrc_with_language;
-    use crate::models::{
-        PhonemeClass, PitchBearingPolicy, ProjectLanguage, PronunciationUnitKind,
-    };
+    use crate::models::{PhonemeClass, PitchBearingPolicy, ProjectLanguage, PronunciationUnitKind};
 
     fn project(text: &str) -> LineV4Layers {
         let lines = parse_lrc_with_language(
